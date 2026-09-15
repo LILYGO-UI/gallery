@@ -1,0 +1,47 @@
+schema_version = 1
+
+[project]
+package = "lilygo-ui-gallery"
+version = "0.1.0"
+app_id = "cc.lilygo.ui.Gallery"
+title = "Gallery"
+summary = "Browse camera photos and screenshots on LILYGO UI."
+description = "A responsive photo gallery for LILYGO UI with thumbnail browsing, full-screen viewing, swipe navigation, and deletion."
+license = "MIT"
+source_repo = "https://github.com/LILYGO-UI/gallery"
+homepage = "https://github.com/LILYGO-UI/gallery"
+categories = ["Multimedia", "Graphics"]
+
+[[project.authors]]
+name = "LILYGO"
+github = "LILYGO"
+
+[project.assets]
+icon = "assets/app-icon.png"
+
+[[project.assets.screenshots]]
+path = "assets/previews/preview1.png"
+caption = "Gallery photo grid"
+
+[[project.permissions]]
+id = "filesystem"
+access = "read-write"
+scope = "shared-data"
+reason = "Browse and delete camera photos and screenshots."
+
+[project.compatibility]
+architectures = ["arm64"]
+min_appkit_version = "0.1.0"
+
+[project.launcher]
+order = 40
+
+[build]
+host_preset = "host-simulator"
+cross_preset = "cm0-cross"
+package_dir = "dist"
+
+[deploy]
+host = "raspberrypi.local"
+user = "pi"
+port = 22
