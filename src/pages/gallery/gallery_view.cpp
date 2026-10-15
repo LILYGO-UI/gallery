@@ -3,6 +3,7 @@
 #include "components/components.hpp"
 #include "pages/gallery/gallery_image.hpp"
 
+#include <cm0/input.h>
 #include <cm0/typography.h>
 
 #include <algorithm>
@@ -281,6 +282,7 @@ void GalleryView::create_viewer()
 {
     // The viewer is a full-page overlay: library chrome never reduces the photo area.
     viewer_ = lv_obj_create(surface_);
+    cm0_input_set_focus_scope(viewer_);
     lv_obj_set_name_static(viewer_, "gallery_viewer");
     style_transparent_container(viewer_);
     lv_obj_add_flag(viewer_, LV_OBJ_FLAG_FLOATING);
@@ -376,6 +378,7 @@ void GalleryView::create_viewer()
 
     // The sheet shares space with the image so both remain visible on short displays.
     viewer_details_ = lv_obj_create(viewer_);
+    cm0_input_set_focus_scope(viewer_details_);
     lv_obj_set_name_static(viewer_details_, "gallery_viewer_details");
     style_transparent_container(viewer_details_);
     lv_obj_add_flag(viewer_details_, LV_OBJ_FLAG_HIDDEN);
@@ -422,6 +425,7 @@ void GalleryView::create_viewer()
 void GalleryView::create_delete_confirmation()
 {
     delete_confirmation_ = lv_obj_create(surface_);
+    cm0_input_set_focus_scope(delete_confirmation_);
     lv_obj_set_name_static(delete_confirmation_, "gallery_delete_confirmation");
     style_transparent_container(delete_confirmation_);
     lv_obj_set_size(delete_confirmation_, LV_PCT(100), LV_PCT(100));
