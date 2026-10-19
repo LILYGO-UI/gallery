@@ -1,0 +1,51 @@
+#!/bin/sh
+set -eu
+
+source_directory="/usr/share/lilygo-ui-gallery/gallery"
+marker_name=".lilygo-ui-gallery-samples-imported"
+
+copy_for_home()
+{
+    home="$1"
+    [ -d "$home" ] || return 0
+
+    uid=$(stat -c '%u' -- "$home" 2>/dev/null || true)
+    gid=$(stat -c '%g' -- "$home" 2>/dev/null || true)
+    [ -n "$uid" ] && [ -n "$gid" ] || return 0
+    [ "$uid" -ge 1000 ] 2>/dev/null || return 0
+
+    pictures="$home/Pictures"
+    marker="$pictures/$marker_name"
+    [ -e "$marker" ] && return 0
+    install -d -m 0755 -o "$uid" -g "$gid" -- "$pictures" 2>/dev/null || return 0
+
+    found=0
+    for sample in "$source_directory"/*; do
+        [ -f "$sample" ] || continue
+        case "$sample" in
+            *.jpg|*.jpeg|*.png|*.ppm) ;;
+            *) continue ;;
+        esac
+        found=1
+        target="$pictures/$(basename "$sample")"
+        [ -e "$target" ] || install -m 0644 -o "$uid" -g "$gid" -- "$sample" "$target" 2>/dev/null || true
+    done
+
+    [ "$found" -eq 1 ] || return 0
+    : > "$marker" 2>/dev/null || return 0
+    chown "$uid:$gid" -- "$marker" 2>/dev/null || true
+    chmod 0644 -- "$marker" 2>/dev/null || true
+}
+
+[ -d "$source_directory" ] || exit 0
+
+target_home=""
+if [ -n "${SUDO_USER:-}" ] && command -v getent >/dev/null 2>&1; then
+    target_home=$(getent passwd "$SUDO_USER" | awk -F: 'NR == 1 { print $6 }')
+fi
+if [ -z "$target_home" ] && command -v getent >/dev/null 2>&1; then
+    target_home=$(getent passwd 1000 | awk -F: 'NR == 1 { print $6 }')
+fi
+[ -n "$target_home" ] && copy_for_home "$target_home"
+
+exit 0

@@ -22,9 +22,11 @@ More portrait and landscape screens are in [`assets/previews`](assets/previews).
 
 ## Features
 
-- **Local library:** scan camera photos, screenshots, and packaged samples on
+- **Local library:** scan camera photos, `$HOME/Pictures`, and screenshots on
   startup or refresh. Show the 24 most recently modified JPEG, PNG, or PPM
-  images, using camera thumbnails when available.
+  images, using camera thumbnails when available. Debian installs import the
+  bundled examples into `$HOME/Pictures` so they can be deleted like other
+  user photos.
 - **Albums:** switch between Library and Albums with bottom tabs. Browse
   All Photos, Camera, Screenshots, and Samples with cover images and counts;
   viewer navigation stays within the chosen collection.
@@ -33,15 +35,18 @@ More portrait and landscape screens are in [`assets/previews`](assets/previews).
   and reflows to 3, 4, or 6 columns for portrait and landscape displays.
 - **Full-screen viewing:** display the complete photo without cropping, with
   its modification date and filename. Navigate with the thumbnail filmstrip,
-  previous/next controls, or horizontal swipes; swipe down to return to the grid.
-- **Photo details:** swipe up to view the filename, modification time, size,
-  source, and location in a scrollable panel. Closing it restores viewer controls.
+  previous/next controls, or horizontal swipes; use the plus/minus controls to
+  zoom in 25% steps and drag a zoomed photo to inspect other regions; swipe down
+  to return to the grid.
+- **Photo details:** swipe up or use the details button to view the filename,
+  modification time, size, source, and location in a scrollable panel. Closing
+  it restores viewer controls.
 - **Deletion confirmation:** confirm permanent deletion in a bottom action
   sheet, including removal of a separate camera thumbnail. Samples are read-only.
 
 An empty host gallery automatically loads read-only samples from
 `assets/gallery/`. See [images and storage](docs/02-images-and-storage.md) for
-source paths, environment overrides, format support, and sample fallback rules.
+source paths, environment overrides, format support, and sample import rules.
 
 ## Development Environment
 

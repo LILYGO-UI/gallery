@@ -171,6 +171,8 @@ int main(int argc, char **argv)
     const auto *created       = ::mkdtemp(directory_template);
     assert(created);
     const std::string directory  = created;
+    const std::string pictures_directory = directory + "/pictures";
+    assert(::mkdir(pictures_directory.c_str(), 0700) == 0);
     const auto *sample_directory = std::getenv("LILYGO_GALLERY_RENDER_SAMPLE_DIR");
     const std::vector<std::string> photos =
         sample_directory && *sample_directory
@@ -186,6 +188,7 @@ int main(int argc, char **argv)
         write_photo(photos[2], 160, 55, 25);
     }
     assert(::setenv("LILYGO_GALLERY_PHOTO_DIR", directory.c_str(), 1) == 0);
+    assert(::setenv("LILYGO_GALLERY_PICTURES_DIR", pictures_directory.c_str(), 1) == 0);
     assert(::setenv("LILYGO_GALLERY_SCREENSHOT_DIR", directory.c_str(), 1) == 0);
     assert(::setenv("LILYGO_GALLERY_SAMPLE_DIR", (directory + "/missing-samples").c_str(), 1) == 0);
 
@@ -286,14 +289,39 @@ int main(int argc, char **argv)
     assert(lv_obj_has_state(previous, LV_STATE_DISABLED));
     assert(!lv_obj_has_state(next, LV_STATE_DISABLED));
 
+    auto *viewer_image_area = lv_obj_find_by_name(context.root, "gallery_viewer_image_area");
+    auto *zoom_in           = lv_obj_find_by_name(context.root, "gallery_zoom_in");
+    auto *zoom_out          = lv_obj_find_by_name(context.root, "gallery_zoom_out");
+    auto *zoom_label        = lv_obj_find_by_name(context.root, "gallery_zoom_label");
+    assert(viewer_image_area && zoom_in && zoom_out && zoom_label);
+    const auto fitted_width = lv_obj_get_width(viewer_image);
+    lv_obj_send_event(zoom_in, LV_EVENT_CLICKED, nullptr);
+    lv_obj_update_layout(context.root);
+    assert(lv_obj_get_width(viewer_image) > lv_obj_get_width(viewer_image_area));
+    assert(lv_obj_get_width(viewer_image) > fitted_width);
+    assert(std::string(lv_label_get_text(zoom_label)) == "125%");
+    const auto centered_x = lv_obj_get_x(viewer_image);
+    swipe(pointer, viewer_image, -80);
+    assert(lv_obj_is_visible(viewer));
+    assert(lv_obj_get_x(viewer_image) < centered_x);
+    lv_obj_send_event(zoom_out, LV_EVENT_CLICKED, nullptr);
+    lv_obj_update_layout(context.root);
+    assert(lv_obj_get_width(viewer_image) == lv_obj_get_width(viewer_image_area));
+    assert(std::string(lv_label_get_text(zoom_label)) == "100%");
+
     auto *details        = lv_obj_find_by_name(context.root, "gallery_viewer_details");
     auto *details_text   = lv_obj_find_by_name(context.root, "gallery_viewer_details_text");
     auto *details_close  = lv_obj_find_by_name(context.root, "gallery_viewer_details_close");
     auto *details_header = lv_obj_find_by_name(context.root, "gallery_viewer_details_header");
     auto *details_body   = lv_obj_find_by_name(context.root, "gallery_viewer_details_body");
     auto *filename       = lv_obj_find_by_name(context.root, "gallery_viewer_filename");
-    assert(details && details_text && details_close && details_header && details_body && filename);
+    auto *details_button = lv_obj_find_by_name(context.root, "gallery_viewer_details_button");
+    assert(details && details_text && details_close && details_header && details_body && filename && details_button);
     assert(!lv_obj_is_visible(details));
+    lv_obj_send_event(details_button, LV_EVENT_CLICKED, nullptr);
+    assert(lv_obj_is_visible(viewer) && lv_obj_is_visible(details));
+    tap(pointer, details_close);
+    assert(lv_obj_is_visible(viewer) && !lv_obj_is_visible(details));
     swipe(pointer, viewer_image, 0, -40);
     assert(lv_obj_is_visible(viewer) && !lv_obj_is_visible(details));
     swipe(pointer, viewer_image, 0, 40);
@@ -560,6 +588,7 @@ int main(int argc, char **argv)
 
     for (const auto &photo : photos) std::remove(photo.c_str());
     for (const auto &photo : additional_photos) assert(std::remove(photo.c_str()) == 0);
+    assert(::rmdir(pictures_directory.c_str()) == 0);
     assert(::rmdir(directory.c_str()) == 0);
     return 0;
 }

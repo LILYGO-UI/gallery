@@ -23,9 +23,10 @@ bool belongs_to_collection(const GalleryItem &item, GalleryViewModel::Collection
 }  // namespace
 
 GalleryViewModel::GalleryViewModel(std::string photo_directory, std::string screenshot_directory,
-                                   std::string sample_directory, std::string fallback_directory)
+                                   std::string sample_directory, std::string fallback_directory,
+                                   std::string pictures_directory)
     : model_(std::move(photo_directory), std::move(screenshot_directory), std::move(sample_directory),
-             std::move(fallback_directory))
+             std::move(fallback_directory), std::move(pictures_directory))
 {
     reload();
 }

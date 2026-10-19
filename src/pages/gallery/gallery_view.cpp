@@ -7,6 +7,7 @@
 #include <cm0/typography.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <ctime>
 #include <string>
@@ -18,7 +19,10 @@ constexpr std::int32_t kViewerHeaderHeight = 76;
 constexpr std::int32_t kFilmstripHeight    = 60;
 constexpr std::int32_t kControlBarHeight   = 64;
 constexpr std::int32_t kAlbumGap           = 20;
-using Collection                           = GalleryViewModel::Collection;
+constexpr float kViewerZoomStep              = 0.25F;
+constexpr float kViewerMaximumZoom           = 3.0F;
+constexpr std::uint64_t kViewerMaximumPixels = 2U * 1024U * 1024U;
+using Collection                             = GalleryViewModel::Collection;
 
 void set_font(lv_obj_t *object, std::uint32_t size)
 {
@@ -158,6 +162,21 @@ void set_hidden(lv_obj_t *object, bool hidden)
         lv_obj_remove_flag(object, LV_OBJ_FLAG_HIDDEN);
 }
 
+float maximum_viewer_zoom(std::int32_t width, std::int32_t height)
+{
+    const auto pixels = static_cast<double>(std::max<std::int32_t>(1, width)) *
+                        static_cast<double>(std::max<std::int32_t>(1, height));
+    if (pixels <= 0.0) return 1.0F;
+    return std::max(1.0F, std::min(kViewerMaximumZoom,
+                                   static_cast<float>(std::sqrt(kViewerMaximumPixels / pixels))));
+}
+
+std::int32_t centered_pan_limit(std::int32_t viewport, std::int32_t content)
+{
+    if (content <= viewport) return 0;
+    return (content - viewport) / 2;
+}
+
 }  // namespace
 
 GalleryView::GalleryView(GalleryViewModel &view_model) noexcept : view_model_(view_model)
@@ -226,16 +245,20 @@ void GalleryView::destroy() noexcept
     filmstrip_thumbnails_.clear();
     album_widgets_ = {};
     viewer_pixels_.clear();
+    viewer_item_path_.clear();
     surface_ = header_ = header_title_ = header_count_ = body_ = grid_ = albums_ = nullptr;
     tab_bar_ = library_tab_ = albums_tab_ = nullptr;
     viewer_ = viewer_top_bar_ = viewer_canvas_ = viewer_date_ = viewer_filename_ = viewer_status_ = nullptr;
+    viewer_zoom_controls_ = viewer_zoom_label_ = nullptr;
     viewer_controls_ = viewer_details_ = viewer_details_body_ = viewer_detail_text_ = nullptr;
     viewer_index_ = filmstrip_ = previous_button_ = next_button_ = delete_button_ = nullptr;
     delete_confirmation_ = delete_error_ = nullptr;
     layout_width_ = layout_height_ = -1;
     grid_scroll_y_ = albums_scroll_y_ = 0;
     restore_scroll_                   = false;
-    showing_albums_ = albums_tab_active_ = applying_layout_ = swipe_pressed_ = details_visible_ = false;
+    pan_start_x_ = pan_start_y_ = viewer_pan_x_ = viewer_pan_y_ = 0;
+    viewer_zoom_ = 1.0F;
+    showing_albums_ = albums_tab_active_ = applying_layout_ = swipe_pressed_ = pan_active_ = details_visible_ = false;
 }
 
 void GalleryView::create_header_actions()
@@ -326,11 +349,13 @@ void GalleryView::create_viewer()
     auto *image_area = lv_obj_create(viewer_);
     lv_obj_set_name_static(image_area, "gallery_viewer_image_area");
     style_transparent_container(image_area);
+    lv_obj_set_layout(image_area, LV_LAYOUT_NONE);
     lv_obj_set_width(image_area, LV_PCT(100));
     lv_obj_set_flex_grow(image_area, 1);
     lv_obj_add_event_cb(image_area, content_size_changed_event, LV_EVENT_SIZE_CHANGED, this);
     lv_obj_add_flag(image_area, LV_OBJ_FLAG_PRESS_LOCK);
     lv_obj_add_event_cb(image_area, swipe_event, LV_EVENT_PRESSED, this);
+    lv_obj_add_event_cb(image_area, swipe_event, LV_EVENT_PRESSING, this);
     lv_obj_add_event_cb(image_area, swipe_event, LV_EVENT_RELEASED, this);
     lv_obj_add_event_cb(image_area, swipe_event, LV_EVENT_PRESS_LOST, this);
     viewer_canvas_ = lv_canvas_create(image_area);
@@ -341,6 +366,28 @@ void GalleryView::create_viewer()
     lv_obj_set_width(viewer_status_, LV_PCT(90));
     lv_obj_set_style_text_align(viewer_status_, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_center(viewer_status_);
+
+    viewer_zoom_controls_ = lv_obj_create(image_area);
+    lv_obj_set_name_static(viewer_zoom_controls_, "gallery_zoom_controls");
+    style_transparent_container(viewer_zoom_controls_);
+    lv_obj_set_size(viewer_zoom_controls_, 48, 128);
+    lv_obj_set_style_bg_color(viewer_zoom_controls_, lv_color_hex(components::color_control_background), 0);
+    lv_obj_set_style_bg_opa(viewer_zoom_controls_, LV_OPA_70, 0);
+    lv_obj_set_style_radius(viewer_zoom_controls_, 12, 0);
+    lv_obj_set_flex_flow(viewer_zoom_controls_, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(viewer_zoom_controls_, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_add_flag(viewer_zoom_controls_, LV_OBJ_FLAG_FLOATING);
+    auto *zoom_in = create_button(viewer_zoom_controls_, LV_SYMBOL_PLUS, components::color_container_title,
+                                  zoom_in_event, this, "gallery_zoom_in");
+    auto *zoom_out = create_button(viewer_zoom_controls_, LV_SYMBOL_MINUS, components::color_container_title,
+                                   zoom_out_event, this, "gallery_zoom_out");
+    lv_obj_set_style_bg_opa(zoom_in, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_bg_opa(zoom_out, LV_OPA_TRANSP, 0);
+    viewer_zoom_label_ = create_label(viewer_zoom_controls_, "100%", 14, components::color_container_title);
+    lv_obj_set_name_static(viewer_zoom_label_, "gallery_zoom_label");
+    lv_obj_set_width(viewer_zoom_label_, LV_PCT(100));
+    lv_obj_set_style_text_align(viewer_zoom_label_, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(viewer_zoom_controls_, LV_ALIGN_TOP_RIGHT, -12, 12);
 
     filmstrip_ = lv_obj_create(viewer_);
     lv_obj_set_name_static(filmstrip_, "gallery_filmstrip");
@@ -373,6 +420,8 @@ void GalleryView::create_viewer()
     lv_obj_set_name_static(viewer_index_, "gallery_viewer_index");
     lv_obj_set_flex_grow(viewer_index_, 1);
     lv_obj_set_style_text_align(viewer_index_, LV_TEXT_ALIGN_CENTER, 0);
+    create_button(controls, LV_SYMBOL_LIST, components::color_container_title, details_event, this,
+                  "gallery_viewer_details_button");
     delete_button_ = create_button(controls, LV_SYMBOL_TRASH, components::color_container_title, delete_event, this,
                                    "gallery_delete");
 
@@ -666,6 +715,10 @@ void GalleryView::rebuild_filmstrip()
 void GalleryView::show_grid()
 {
     view_model_.show_grid();
+    viewer_item_path_.clear();
+    viewer_zoom_  = 1.0F;
+    viewer_pan_x_ = 0;
+    viewer_pan_y_ = 0;
     showing_albums_  = false;
     details_visible_ = false;
     set_hidden(viewer_, true);
@@ -713,20 +766,78 @@ void GalleryView::show_viewer()
     render_viewer();
 }
 
+void GalleryView::position_viewer_canvas()
+{
+    if (!viewer_canvas_) return;
+    auto *area = lv_obj_get_parent(viewer_canvas_);
+    if (!area) return;
+
+    const auto viewport_width  = std::max<std::int32_t>(1, lv_obj_get_content_width(area));
+    const auto viewport_height = std::max<std::int32_t>(1, lv_obj_get_content_height(area));
+    const auto canvas_width    = std::max<std::int32_t>(1, lv_obj_get_width(viewer_canvas_));
+    const auto canvas_height   = std::max<std::int32_t>(1, lv_obj_get_height(viewer_canvas_));
+    const auto centered_x      = (viewport_width - canvas_width) / 2;
+    const auto centered_y      = (viewport_height - canvas_height) / 2;
+    const auto pan_limit_x     = centered_pan_limit(viewport_width, canvas_width);
+    const auto pan_limit_y     = centered_pan_limit(viewport_height, canvas_height);
+    viewer_pan_x_              = std::clamp(viewer_pan_x_, -pan_limit_x, pan_limit_x);
+    viewer_pan_y_              = std::clamp(viewer_pan_y_, -pan_limit_y, pan_limit_y);
+    lv_obj_set_pos(viewer_canvas_, centered_x + viewer_pan_x_, centered_y + viewer_pan_y_);
+}
+
+void GalleryView::set_viewer_zoom(float zoom)
+{
+    if (!view_model_.selected_item() || !viewer_canvas_) return;
+    auto *area = lv_obj_get_parent(viewer_canvas_);
+    if (!area) return;
+    const auto width  = std::max<std::int32_t>(1, lv_obj_get_content_width(area));
+    const auto height = std::max<std::int32_t>(1, lv_obj_get_content_height(area));
+    viewer_zoom_      = std::clamp(zoom, 1.0F, maximum_viewer_zoom(width, height));
+    viewer_pan_x_     = 0;
+    viewer_pan_y_     = 0;
+    render_viewer();
+}
+
 void GalleryView::render_viewer()
 {
     const auto *item = view_model_.selected_item();
     if (!item || !viewer_canvas_) return;
+    if (viewer_item_path_ != item->photo_path) {
+        viewer_item_path_ = item->photo_path;
+        viewer_zoom_      = 1.0F;
+        viewer_pan_x_     = 0;
+        viewer_pan_y_     = 0;
+    }
     lv_obj_update_layout(surface_);
     auto *area        = lv_obj_get_parent(viewer_canvas_);
     const auto width  = std::max<std::int32_t>(1, lv_obj_get_content_width(area));
     const auto height = std::max<std::int32_t>(1, lv_obj_get_content_height(area));
-    const bool loaded = gallery_render_image(item->photo_path, width, height, GalleryImageFit::contain, viewer_pixels_);
-    lv_canvas_set_buffer(viewer_canvas_, viewer_pixels_.data(), width, height, LV_COLOR_FORMAT_RGB565);
+    viewer_zoom_      = std::clamp(viewer_zoom_, 1.0F, maximum_viewer_zoom(width, height));
+    auto rendered_width  = std::max<std::int32_t>(1, static_cast<std::int32_t>(std::lround(width * viewer_zoom_)));
+    auto rendered_height = std::max<std::int32_t>(1, static_cast<std::int32_t>(std::lround(height * viewer_zoom_)));
+    while (static_cast<std::uint64_t>(rendered_width) * rendered_height > kViewerMaximumPixels &&
+           viewer_zoom_ > 1.0F) {
+        viewer_zoom_ -= 0.01F;
+        rendered_width  = std::max<std::int32_t>(1, static_cast<std::int32_t>(std::lround(width * viewer_zoom_)));
+        rendered_height = std::max<std::int32_t>(1, static_cast<std::int32_t>(std::lround(height * viewer_zoom_)));
+    }
+    const bool loaded = gallery_render_image(item->photo_path, static_cast<std::uint32_t>(rendered_width),
+                                             static_cast<std::uint32_t>(rendered_height), GalleryImageFit::contain,
+                                             viewer_pixels_);
+    lv_canvas_set_buffer(viewer_canvas_, viewer_pixels_.data(), rendered_width, rendered_height,
+                         LV_COLOR_FORMAT_RGB565);
+    lv_obj_set_size(viewer_canvas_, rendered_width, rendered_height);
+    lv_obj_refr_size(viewer_canvas_);
+    position_viewer_canvas();
+    lv_obj_refr_pos(viewer_canvas_);
     lv_obj_invalidate(viewer_canvas_);
+    if (viewer_zoom_label_) {
+        lv_label_set_text_fmt(viewer_zoom_label_, "%d%%", static_cast<int>(std::lround(viewer_zoom_ * 100.0F)));
+    }
     lv_label_set_text(viewer_date_, photo_date(item->modified_time).c_str());
     lv_label_set_text(viewer_filename_, item->filename.c_str());
     const auto source  = item->source == GallerySource::camera        ? "Camera"
+                         : item->source == GallerySource::pictures    ? "Pictures"
                          : item->source == GallerySource::screenshots ? "Screenshots"
                                                                       : "Samples (read-only)";
     const auto details = "Filename: " + item->filename + "\n\nModified: " + photo_date(item->modified_time, true) +
@@ -745,6 +856,7 @@ void GalleryView::set_details_visible(bool visible)
     details_visible_ = visible;
     set_hidden(viewer_details_, !visible);
     set_hidden(viewer_controls_, visible);
+    set_hidden(viewer_zoom_controls_, visible);
     set_hidden(filmstrip_, visible || lv_obj_get_content_height(surface_) < 400);
     if (visible) lv_obj_scroll_to_y(viewer_details_body_, 0, LV_ANIM_OFF);
 }
@@ -938,6 +1050,28 @@ void GalleryView::next_event(lv_event_t *event)
     if (view->view_model_.select_next()) view->render_viewer();
 }
 
+void GalleryView::zoom_in_event(lv_event_t *event)
+{
+    auto *view = static_cast<GalleryView *>(lv_event_get_user_data(event));
+    if (view) view->set_viewer_zoom(view->viewer_zoom_ + kViewerZoomStep);
+}
+
+void GalleryView::zoom_out_event(lv_event_t *event)
+{
+    auto *view = static_cast<GalleryView *>(lv_event_get_user_data(event));
+    if (view) view->set_viewer_zoom(view->viewer_zoom_ - kViewerZoomStep);
+}
+
+void GalleryView::details_event(lv_event_t *event)
+{
+    auto *view = static_cast<GalleryView *>(lv_event_get_user_data(event));
+    if (!view || view->view_model_.mode() != GalleryViewModel::Mode::viewer || !view->view_model_.selected_item()) {
+        return;
+    }
+    view->set_details_visible(true);
+    view->render_viewer();
+}
+
 void GalleryView::delete_event(lv_event_t *event)
 {
     auto *view       = static_cast<GalleryView *>(lv_event_get_user_data(event));
@@ -977,6 +1111,7 @@ void GalleryView::swipe_event(lv_event_t *event)
     const auto *input = lv_indev_active();
     if (code == LV_EVENT_PRESS_LOST) {
         view->swipe_pressed_ = false;
+        view->pan_active_    = false;
         return;
     }
     if (!input || view->view_model_.mode() != GalleryViewModel::Mode::viewer ||
@@ -987,10 +1122,28 @@ void GalleryView::swipe_event(lv_event_t *event)
     if (code == LV_EVENT_PRESSED) {
         view->press_point_   = point;
         view->swipe_pressed_ = true;
+        view->pan_active_    = view->viewer_zoom_ > 1.001F;
+        if (view->pan_active_) {
+            view->pan_start_x_ = view->viewer_pan_x_;
+            view->pan_start_y_ = view->viewer_pan_y_;
+        }
+        return;
+    }
+    if (code == LV_EVENT_PRESSING) {
+        if (!view->swipe_pressed_ || !view->pan_active_) return;
+        const auto delta_x = point.x - view->press_point_.x;
+        const auto delta_y = point.y - view->press_point_.y;
+        view->viewer_pan_x_ = view->pan_start_x_ + delta_x;
+        view->viewer_pan_y_ = view->pan_start_y_ + delta_y;
+        view->position_viewer_canvas();
         return;
     }
     if (!view->swipe_pressed_) return;
     view->swipe_pressed_ = false;
+    if (view->pan_active_) {
+        view->pan_active_ = false;
+        return;
+    }
     const auto delta_x   = point.x - view->press_point_.x;
     const auto delta_y   = point.y - view->press_point_.y;
     // Vertical swipes control the viewer itself. A downward swipe is the

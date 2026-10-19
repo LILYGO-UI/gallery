@@ -4,6 +4,7 @@
 #include <cctype>
 #include <cerrno>
 #include <cstdio>
+#include <cstdlib>
 #include <dirent.h>
 #include <sys/stat.h>
 #include <utility>
@@ -43,26 +44,59 @@ std::string camera_thumbnail_path(const std::string &directory, const std::strin
 
 }  // namespace
 
+std::string gallery_default_photo_directory()
+{
+    const char *home = std::getenv("HOME");
+    if (!home || !*home) return {};
+    return std::string(home) + "/Camera";
+}
+
+std::string gallery_default_screenshot_directory()
+{
+    const char *home = std::getenv("HOME");
+    if (!home || !*home) return {};
+    return std::string(home) + "/screenshots";
+}
+
+std::string gallery_default_pictures_directory()
+{
+    const char *home = std::getenv("HOME");
+    if (!home || !*home) return {};
+    return std::string(home) + "/Pictures";
+}
+
 GalleryModel::GalleryModel(std::string photo_directory, std::string screenshot_directory, std::string sample_directory,
-                           std::string fallback_directory)
-    : photo_directory_(std::move(photo_directory)),
-      screenshot_directory_(std::move(screenshot_directory)),
+                           std::string fallback_directory, std::string pictures_directory)
+    : photo_directory_(photo_directory.empty() ? gallery_default_photo_directory() : std::move(photo_directory)),
+      screenshot_directory_(screenshot_directory.empty() ? gallery_default_screenshot_directory()
+                                                          : std::move(screenshot_directory)),
       sample_directory_(std::move(sample_directory)),
-      fallback_directory_(std::move(fallback_directory))
+      fallback_directory_(std::move(fallback_directory)),
+      pictures_directory_(pictures_directory.empty() && photo_directory.empty() && screenshot_directory.empty()
+                              ? gallery_default_pictures_directory()
+                              : std::move(pictures_directory))
 {
 }
 
 void GalleryModel::reload()
 {
     items_.clear();
-    scan_directory(photo_directory_, false, false);
-    if (screenshot_directory_ != photo_directory_) scan_directory(screenshot_directory_, true, false);
+    scan_directory(photo_directory_, GallerySource::camera, false);
+    if (!pictures_directory_.empty() && pictures_directory_ != photo_directory_ &&
+        pictures_directory_ != screenshot_directory_) {
+        scan_directory(pictures_directory_, GallerySource::pictures, false);
+    }
+    if (screenshot_directory_ != photo_directory_ && screenshot_directory_ != pictures_directory_) {
+        scan_directory(screenshot_directory_, GallerySource::screenshots, false);
+    }
     if (!sample_directory_.empty() && sample_directory_ != photo_directory_ &&
-        sample_directory_ != screenshot_directory_) {
-        scan_directory(sample_directory_, false, true);
+        sample_directory_ != screenshot_directory_ && sample_directory_ != pictures_directory_) {
+        scan_directory(sample_directory_, GallerySource::samples, true);
     }
 
-    if (items_.empty() && !fallback_directory_.empty()) scan_directory(fallback_directory_, false, true);
+    if (items_.empty() && !fallback_directory_.empty()) {
+        scan_directory(fallback_directory_, GallerySource::samples, true);
+    }
 
     std::sort(items_.begin(), items_.end(), [](const GalleryItem &left, const GalleryItem &right) {
         if (left.modified_time != right.modified_time) return left.modified_time > right.modified_time;
@@ -126,7 +160,7 @@ bool GalleryModel::remove_selected() noexcept
     return true;
 }
 
-void GalleryModel::scan_directory(const std::string &directory, bool screenshots, bool read_only)
+void GalleryModel::scan_directory(const std::string &directory, GallerySource source, bool read_only)
 {
     auto *folder = ::opendir(directory.c_str());
     if (!folder) return;
@@ -140,12 +174,10 @@ void GalleryModel::scan_directory(const std::string &directory, bool screenshots
         if (!is_regular_file(photo_path, &information)) continue;
 
         auto thumbnail_path = photo_path;
-        if (!screenshots) {
+        if (source != GallerySource::screenshots) {
             const auto stored_thumbnail = camera_thumbnail_path(directory, name);
             if (is_regular_file(stored_thumbnail)) thumbnail_path = stored_thumbnail;
         }
-        const auto source =
-            read_only ? GallerySource::samples : (screenshots ? GallerySource::screenshots : GallerySource::camera);
         const auto size_bytes = information.st_size >= 0 ? static_cast<std::uint64_t>(information.st_size) : 0;
         items_.push_back({photo_path, thumbnail_path, name, static_cast<std::int64_t>(information.st_mtime), read_only,
                           source, size_bytes});

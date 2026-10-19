@@ -6,8 +6,9 @@ Model、ViewModel 和 LVGL View。
 
 ## 数据与行为
 
-- 默认读取 `/root/photos`、`/root/screenshots` 和安装包中的
-  `/usr/share/lilygo-ui-gallery/gallery` 示例目录。
+- 默认读取当前用户的 `$HOME/Camera`、`$HOME/Pictures` 和 `$HOME/screenshots`。
+  Debian 安装包会把内置示例导入 `$HOME/Pictures`；安装包内的
+  `/usr/share/lilygo-ui-gallery/gallery` 仅作为导入源。
 - 支持 JPEG、PNG、PPM，以及相机生成的 `360x640` RGB565 缩略图。
 - 合并来源目录后按修改时间倒序排列，最多展示 24 项。
 - 底部 Library / Albums 标签切换图库与相册；页面顶部显示大标题和照片数量。
@@ -19,9 +20,9 @@ Model、ViewModel 和 LVGL View。
   `.thumb.rgb565` 文件。示例照片只读，删除按钮不可用。
 - 刷新按钮重新扫描目录，新拍摄的照片无需重启应用即可出现。
 
-主机模拟器可用 `LILYGO_GALLERY_PHOTO_DIR`、`LILYGO_GALLERY_SCREENSHOT_DIR` 和
-`LILYGO_GALLERY_SAMPLE_DIR` 覆盖默认目录。设备构建始终使用默认目录，除非启动
-进程显式提供同名环境变量。
+主机模拟器可用 `LILYGO_GALLERY_PHOTO_DIR`、`LILYGO_GALLERY_PICTURES_DIR`、
+`LILYGO_GALLERY_SCREENSHOT_DIR` 和 `LILYGO_GALLERY_SAMPLE_DIR` 覆盖默认目录。
+设备构建始终使用默认目录，除非启动进程显式提供同名环境变量。
 
 ## 架构
 

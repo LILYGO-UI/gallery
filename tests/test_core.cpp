@@ -153,11 +153,121 @@ void test_development_samples_fallback()
     assert(::rmdir(root.c_str()) == 0);
 }
 
+void test_default_camera_directory_uses_home()
+{
+    char root_template[] = "/tmp/lilygo-gallery-home-XXXXXX";
+    const auto *created  = ::mkdtemp(root_template);
+    assert(created);
+    const std::string root   = created;
+    const std::string camera = make_directory(root, "Camera");
+    const std::string photo  = camera + "/capture.jpg";
+    write_file(photo, "jpeg", 100);
+
+    const char *previous_home = std::getenv("HOME");
+    const bool had_home       = previous_home && *previous_home;
+    const std::string old_home = had_home ? previous_home : std::string();
+    assert(::setenv("HOME", root.c_str(), 1) == 0);
+
+    assert(gallery_default_photo_directory() == camera);
+    GalleryModel model;
+    model.reload();
+    assert(model.items().size() == 1);
+    assert(model.items()[0].photo_path == photo);
+    assert(model.items()[0].source == GallerySource::camera);
+
+    if (had_home) {
+        assert(::setenv("HOME", old_home.c_str(), 1) == 0);
+    } else {
+        assert(::unsetenv("HOME") == 0);
+    }
+    assert(std::remove(photo.c_str()) == 0);
+    assert(::rmdir(camera.c_str()) == 0);
+    assert(::rmdir(root.c_str()) == 0);
+}
+
+void test_default_screenshot_directory_uses_home()
+{
+    char root_template[] = "/tmp/lilygo-gallery-screenshots-home-XXXXXX";
+    const auto *created  = ::mkdtemp(root_template);
+    assert(created);
+    const std::string root        = created;
+    const std::string camera      = make_directory(root, "Camera");
+    const std::string screenshots = make_directory(root, "screenshots");
+    const std::string photo       = camera + "/capture.jpg";
+    const std::string screenshot  = screenshots + "/screen.png";
+    write_file(photo, "jpeg", 100);
+    write_file(screenshot, "png", 200);
+
+    const char *previous_home = std::getenv("HOME");
+    const bool had_home       = previous_home && *previous_home;
+    const std::string old_home = had_home ? previous_home : std::string();
+    assert(::setenv("HOME", root.c_str(), 1) == 0);
+
+    assert(gallery_default_screenshot_directory() == screenshots);
+    GalleryModel model;
+    model.reload();
+    assert(model.items().size() == 2);
+    assert(model.items()[0].photo_path == screenshot);
+    assert(model.items()[0].source == GallerySource::screenshots);
+
+    if (had_home) {
+        assert(::setenv("HOME", old_home.c_str(), 1) == 0);
+    } else {
+        assert(::unsetenv("HOME") == 0);
+    }
+    assert(std::remove(photo.c_str()) == 0);
+    assert(std::remove(screenshot.c_str()) == 0);
+    assert(::rmdir(camera.c_str()) == 0);
+    assert(::rmdir(screenshots.c_str()) == 0);
+    assert(::rmdir(root.c_str()) == 0);
+}
+
+void test_pictures_directory_is_writable_gallery_source()
+{
+    char root_template[] = "/tmp/lilygo-gallery-pictures-home-XXXXXX";
+    const auto *created  = ::mkdtemp(root_template);
+    assert(created);
+    const std::string root        = created;
+    const std::string camera      = make_directory(root, "Camera");
+    const std::string screenshots = make_directory(root, "screenshots");
+    const std::string pictures    = make_directory(root, "Pictures");
+    const std::string photo       = pictures + "/sample.jpg";
+    write_file(photo, "jpeg", 100);
+
+    const char *previous_home = std::getenv("HOME");
+    const bool had_home       = previous_home && *previous_home;
+    const std::string old_home = had_home ? previous_home : std::string();
+    assert(::setenv("HOME", root.c_str(), 1) == 0);
+    assert(gallery_default_pictures_directory() == pictures);
+
+    GalleryModel model(camera, screenshots, {}, {}, pictures);
+    model.reload();
+    assert(model.items().size() == 1);
+    assert(model.items()[0].photo_path == photo);
+    assert(model.items()[0].source == GallerySource::pictures);
+    assert(!model.items()[0].read_only);
+    assert(model.remove_selected());
+    assert(::access(photo.c_str(), F_OK) != 0);
+
+    if (had_home) {
+        assert(::setenv("HOME", old_home.c_str(), 1) == 0);
+    } else {
+        assert(::unsetenv("HOME") == 0);
+    }
+    assert(::rmdir(camera.c_str()) == 0);
+    assert(::rmdir(screenshots.c_str()) == 0);
+    assert(::rmdir(pictures.c_str()) == 0);
+    assert(::rmdir(root.c_str()) == 0);
+}
+
 }  // namespace
 
 int main()
 {
     test_model();
     test_development_samples_fallback();
+    test_default_camera_directory_uses_home();
+    test_default_screenshot_directory_uses_home();
+    test_pictures_directory_is_writable_gallery_source();
     return 0;
 }

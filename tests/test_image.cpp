@@ -9,7 +9,7 @@
 
 int main(int argc, char **argv)
 {
-    assert(argc == 5);
+    assert(argc == 6);
     lv_init();
 
     std::vector<std::uint8_t> pixels;
@@ -37,6 +37,12 @@ int main(int argc, char **argv)
     const auto green = (sample >> 5U) & 0x3fU;
     const auto blue  = sample & 0x1fU;
     assert(green > red && green > blue);
+
+    // The legacy TJPGD compatibility check rejects progressive JPEGs. They must
+    // still render successfully through LVGL's libjpeg-turbo decoder.
+    assert(!gallery_is_bounded_baseline_jpeg(argv[5]));
+    assert(gallery_render_image(argv[5], 96, 72, GalleryImageFit::contain, pixels));
+    assert(std::any_of(pixels.begin(), pixels.end(), [](std::uint8_t value) { return value != 0; }));
 
     // These lossless samples have identical pixels; compare the full decoded
     // output to catch corrupt rows and incorrect channel order in PNG loading.

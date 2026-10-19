@@ -4,11 +4,12 @@
 
 #define LODEPNG_NO_COMPILE_CPP
 #include <src/libs/lodepng/lodepng.h>
+#include <src/draw/lv_image_decoder.h>
+#include <src/draw/lv_image_decoder_private.h>
 
 #include <algorithm>
 #include <array>
 #include <cctype>
-#include <csetjmp>
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
@@ -17,12 +18,6 @@
 #include <limits>
 #include <string>
 #include <sys/stat.h>
-
-#if defined(GALLERY_HAS_JPEG)
-#include <jpeglib.h>
-#elif defined(GALLERY_HAS_LVGL_TJPGD)
-#include <src/libs/tjpgd/tjpgd.h>
-#endif
 
 namespace {
 
@@ -230,169 +225,38 @@ bool read_png(const std::string &path, SourceImage &image)
     return true;
 }
 
-#if defined(GALLERY_HAS_JPEG)
-struct JpegErrorManager {
-    jpeg_error_mgr base{};
-    std::jmp_buf jump{};
-};
-
-void jpeg_error_exit(j_common_ptr decoder)
-{
-    auto *error = reinterpret_cast<JpegErrorManager *>(decoder->err);
-    std::longjmp(error->jump, 1);
-}
-
+#if defined(GALLERY_HAS_LVGL_LIBJPEG_TURBO)
 bool read_jpeg(const std::string &path, SourceImage &image)
 {
-    FILE *file = std::fopen(path.c_str(), "rb");
-    if (!file) return false;
+    lv_image_decoder_dsc_t decoder{};
+    lv_image_decoder_args_t args{};
+    args.no_cache = true;
+    if (lv_image_decoder_open(&decoder, path.c_str(), &args) != LV_RESULT_OK || !decoder.decoded) return false;
 
-    jpeg_decompress_struct decoder{};
-    JpegErrorManager error{};
-    decoder.err                    = jpeg_std_error(&error.base);
-    error.base.error_exit          = jpeg_error_exit;
-    volatile bool decoder_created  = false;
-    unsigned char *volatile pixels = nullptr;
-
-    if (setjmp(error.jump) != 0) {
-        std::free(const_cast<unsigned char *>(pixels));
-        if (decoder_created) jpeg_destroy_decompress(&decoder);
-        std::fclose(file);
+    const auto *buffer = decoder.decoded;
+    const auto valid = buffer->header.cf == LV_COLOR_FORMAT_RGB888 &&
+                       source_size_is_valid(buffer->header.w, buffer->header.h, 3);
+    if (!valid) {
+        lv_image_decoder_close(&decoder);
         return false;
     }
 
-    jpeg_create_decompress(&decoder);
-    decoder_created = true;
-    jpeg_stdio_src(&decoder, file);
-    jpeg_read_header(&decoder, TRUE);
-    decoder.out_color_space = JCS_RGB;
-    jpeg_start_decompress(&decoder);
-    if (decoder.output_components != 3 || !source_size_is_valid(decoder.output_width, decoder.output_height, 3)) {
-        jpeg_destroy_decompress(&decoder);
-        std::fclose(file);
-        return false;
-    }
-
-    const auto byte_count = static_cast<std::size_t>(decoder.output_width) * decoder.output_height * 3U;
-    pixels                = static_cast<unsigned char *>(std::malloc(byte_count));
-    if (!pixels) {
-        jpeg_destroy_decompress(&decoder);
-        std::fclose(file);
-        return false;
-    }
-    while (decoder.output_scanline < decoder.output_height) {
-        auto *row = const_cast<unsigned char *>(pixels) +
-                    static_cast<std::size_t>(decoder.output_scanline) * decoder.output_width * 3U;
-        JSAMPROW rows[] = {row};
-        if (jpeg_read_scanlines(&decoder, rows, 1) != 1) {
-            std::free(const_cast<unsigned char *>(pixels));
-            jpeg_destroy_decompress(&decoder);
-            std::fclose(file);
-            return false;
-        }
-    }
-    jpeg_finish_decompress(&decoder);
-
-    image.width  = decoder.output_width;
-    image.height = decoder.output_height;
+    image.width  = buffer->header.w;
+    image.height = buffer->header.h;
     image.format = PixelFormat::rgb;
-    image.pixels.assign(const_cast<unsigned char *>(pixels), const_cast<unsigned char *>(pixels) + byte_count);
-    std::free(const_cast<unsigned char *>(pixels));
-    jpeg_destroy_decompress(&decoder);
-    std::fclose(file);
-    return true;
-}
-#endif
-
-#if defined(GALLERY_HAS_LVGL_TJPGD)
-static_assert(JD_FORMAT == 0, "Gallery's TJPGD fallback requires LVGL's BGR888 output");
-
-struct TjpgdRenderContext {
-    FILE *file                 = nullptr;
-    std::uint32_t target_width = 0;
-    RenderMapping mapping{};
-    std::vector<std::uint8_t> *target = nullptr;
-};
-
-std::size_t tjpgd_read(JDEC *decoder, std::uint8_t *buffer, std::size_t byte_count)
-{
-    auto *context = static_cast<TjpgdRenderContext *>(decoder->device);
-    if (buffer) return std::fread(buffer, 1, byte_count, context->file);
-    return std::fseek(context->file, static_cast<long>(byte_count), SEEK_CUR) == 0 ? byte_count : 0;
-}
-
-std::uint64_t divide_rounding_up(std::uint64_t numerator, std::uint64_t denominator)
-{
-    return (numerator + denominator - 1U) / denominator;
-}
-
-int tjpgd_write(JDEC *decoder, void *bitmap, JRECT *rectangle)
-{
-    auto *context       = static_cast<TjpgdRenderContext *>(decoder->device);
-    const auto &mapping = context->mapping;
-    const auto left     = std::max<std::uint32_t>(rectangle->left, mapping.source_x);
-    const auto right    = std::min<std::uint32_t>(rectangle->right, mapping.source_x + mapping.visible_width - 1U);
-    const auto top      = std::max<std::uint32_t>(rectangle->top, mapping.source_y);
-    const auto bottom   = std::min<std::uint32_t>(rectangle->bottom, mapping.source_y + mapping.visible_height - 1U);
-    if (left > right || top > bottom) return 1;
-
-    const auto destination_x_begin = static_cast<std::uint32_t>(divide_rounding_up(
-        static_cast<std::uint64_t>(left - mapping.source_x) * mapping.draw_width, mapping.visible_width));
-    const auto destination_x_end   = static_cast<std::uint32_t>(divide_rounding_up(
-        static_cast<std::uint64_t>(right - mapping.source_x + 1U) * mapping.draw_width, mapping.visible_width));
-    const auto destination_y_begin = static_cast<std::uint32_t>(divide_rounding_up(
-        static_cast<std::uint64_t>(top - mapping.source_y) * mapping.draw_height, mapping.visible_height));
-    const auto destination_y_end   = static_cast<std::uint32_t>(divide_rounding_up(
-        static_cast<std::uint64_t>(bottom - mapping.source_y + 1U) * mapping.draw_height, mapping.visible_height));
-    const auto block_width         = static_cast<std::uint32_t>(rectangle->right - rectangle->left + 1U);
-    const auto *source             = static_cast<const std::uint8_t *>(bitmap);
-
-    for (auto destination_y = destination_y_begin; destination_y < destination_y_end; ++destination_y) {
-        const auto source_y =
-            mapping.source_y + static_cast<std::uint32_t>(static_cast<std::uint64_t>(destination_y) *
-                                                          mapping.visible_height / mapping.draw_height);
-        for (auto destination_x = destination_x_begin; destination_x < destination_x_end; ++destination_x) {
-            const auto source_x =
-                mapping.source_x + static_cast<std::uint32_t>(static_cast<std::uint64_t>(destination_x) *
-                                                              mapping.visible_width / mapping.draw_width);
-            const auto source_offset =
-                (static_cast<std::size_t>(source_y - rectangle->top) * block_width + source_x - rectangle->left) * 3U;
-            const auto output_offset =
-                (static_cast<std::size_t>(mapping.offset_y + destination_y) * context->target_width + mapping.offset_x +
-                 destination_x) *
-                2U;
-            write_rgb565(context->target->data() + output_offset, source[source_offset + 2U],
-                         source[source_offset + 1U], source[source_offset]);
+    const auto row_bytes = static_cast<std::size_t>(image.width) * 3U;
+    image.pixels.resize(row_bytes * image.height);
+    for (std::uint32_t row = 0; row < image.height; ++row) {
+        const auto *source = buffer->data + row * buffer->header.stride;
+        auto *target       = image.pixels.data() + row * row_bytes;
+        for (std::uint32_t column = 0; column < image.width; ++column) {
+            target[column * 3U]     = source[column * 3U + 2U];
+            target[column * 3U + 1U] = source[column * 3U + 1U];
+            target[column * 3U + 2U] = source[column * 3U];
         }
     }
-    return 1;
-}
-
-bool render_jpeg_with_tjpgd(const std::string &path, std::uint32_t target_width, std::uint32_t target_height,
-                            GalleryImageFit fit, std::vector<std::uint8_t> &target)
-{
-    if (!gallery_is_bounded_baseline_jpeg(path)) return false;
-
-    auto *file = std::fopen(path.c_str(), "rb");
-    if (!file) return false;
-
-    std::array<std::uint8_t, 4096> workspace{};
-    JDEC decoder{};
-    TjpgdRenderContext context{};
-    context.file         = file;
-    context.target_width = target_width;
-    context.target       = &target;
-
-    const auto prepared = jd_prepare(&decoder, tjpgd_read, workspace.data(), workspace.size(), &context);
-    if (prepared != JDR_OK || !source_size_is_valid(decoder.width, decoder.height, 3)) {
-        std::fclose(file);
-        return false;
-    }
-
-    context.mapping   = calculate_mapping(decoder.width, decoder.height, target_width, target_height, fit);
-    const auto result = jd_decomp(&decoder, tjpgd_write, 0);
-    std::fclose(file);
-    return result == JDR_OK;
+    lv_image_decoder_close(&decoder);
+    return true;
 }
 #endif
 
@@ -402,7 +266,7 @@ bool load_source(const std::string &path, SourceImage &image)
     if (extension == ".rgb565") return read_stored_thumbnail(path, image);
     if (extension == ".png") return read_png(path, image);
     if (extension == ".ppm") return read_ppm(path, image);
-#if defined(GALLERY_HAS_JPEG)
+#if defined(GALLERY_HAS_LVGL_LIBJPEG_TURBO)
     if (extension == ".jpg" || extension == ".jpeg") return read_jpeg(path, image);
 #endif
     return false;
@@ -492,15 +356,6 @@ bool gallery_render_image(const std::string &path, std::uint32_t width, std::uin
     if (width == 0 || height == 0 || static_cast<std::uint64_t>(width) * height > 2U * 1024U * 1024U) return false;
     rgb565.resize(static_cast<std::size_t>(width) * height * 2U);
     fill_rgb565(rgb565, components::color_viewer_background);
-
-#if defined(GALLERY_HAS_LVGL_TJPGD)
-    const auto extension = lowercase_extension(path);
-    if (extension == ".jpg" || extension == ".jpeg") {
-        if (render_jpeg_with_tjpgd(path, width, height, fit, rgb565)) return true;
-        fill_rgb565(rgb565, components::color_viewer_background);
-        return false;
-    }
-#endif
 
     SourceImage source;
     if (!load_source(path, source)) return false;

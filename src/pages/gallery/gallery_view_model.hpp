@@ -12,9 +12,9 @@ public:
     enum class Mode : int { grid = 0, viewer = 1 };
     enum class Collection { all, camera, screenshots, samples };
 
-    explicit GalleryViewModel(std::string photo_directory      = "/root/photos",
-                              std::string screenshot_directory = "/root/screenshots", std::string sample_directory = {},
-                              std::string fallback_directory = {});
+    explicit GalleryViewModel(std::string photo_directory      = {},
+                              std::string screenshot_directory = {}, std::string sample_directory = {},
+                              std::string fallback_directory = {}, std::string pictures_directory = {});
 
     void reload();
     [[nodiscard]] const std::vector<GalleryItem> &items() const noexcept;

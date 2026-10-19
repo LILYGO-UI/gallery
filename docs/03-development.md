@@ -27,9 +27,9 @@ project commands from the repository root.
 Use CMake 3.21 or later (including CTest and CPack), Python 3.11 or later for
 LPM, and a C/C++ compiler with C++17 support. The presets use Unix Makefiles.
 AppKit requires `pkg-config`, `patch`, SDL2 for the host display, and FreeType
-for font rendering. libjpeg is optional; when absent, the bundled LVGL build
-provides baseline JPEG decoding. See [image formats](02-images-and-storage.md#image-formats-and-thumbnails)
-for the decoder differences.
+for font rendering. libjpeg-turbo development headers and libraries are required
+for Gallery's JPEG decoder. See [image formats](02-images-and-storage.md#image-formats-and-thumbnails)
+for the supported JPEG formats.
 
 ### Debian 12 / Ubuntu 24.04 or Later
 
@@ -39,10 +39,10 @@ sudo apt install build-essential cmake git pkg-config patch libsdl2-dev \
   libfreetype6-dev python3 python3-venv python3-pip
 ```
 
-For optional libjpeg support:
+For libjpeg-turbo support:
 
 ```sh
-sudo apt install libjpeg-dev
+sudo apt install libjpeg62-turbo-dev
 ```
 
 On older distributions, upgrade CMake and Python to the minimum versions above.
@@ -58,7 +58,7 @@ xcode-select --install
 brew install git cmake pkg-config patch sdl2 freetype python
 ```
 
-For optional libjpeg support:
+For libjpeg-turbo support:
 
 ```sh
 brew install jpeg-turbo
@@ -207,15 +207,29 @@ access to GitHub; later configurations reuse the cache. Set
 `-DCM0_BSP_CACHE_DIR=/absolute/path/to/cache` during configuration to change the
 cache location. A sibling CM0BspBuilder checkout is not required.
 
-Cross compilation needs target FreeType and DRM headers and libraries in the
-SDK sysroot. libjpeg is optional, as on the host. Host libraries cannot substitute
-for target dependencies.
+Cross compilation needs target FreeType, DRM, and libjpeg-turbo runtime libraries
+in the SDK sysroot. The LVGL decoder also needs a matching target development
+package. If the BSP has only `libjpeg.so.62`, extract the matching Debian
+`libjpeg-turbo` development package and configure with:
+
+```sh
+cmake --preset cm0-cross \
+  -DLIBJPEG_TURBO_DEV_ROOT=/absolute/path/to/libjpeg-turbo-dev
+```
+
+`LIBJPEG_TURBO_DEV_ROOT` may contain `usr/include` and
+`usr/lib/aarch64-linux-gnu` directly. CMake links the target library from that
+root or from the BSP sysroot; it never links a host library into the CM0
+executable. Configuration stops with an explicit error when the headers or
+target library are missing.
 
 CPack writes an ARM64 `.deb` to `dist/`. The package installs the executable,
-launcher entry and icon, desktop entry, AppStream metadata, gallery samples,
-and shared-font license notices. The target system must provide `libc6`,
+launcher entry and icon, desktop entry, AppStream metadata, the gallery sample
+import source, and shared-font license notices. During installation the Debian
+maintainer script copies supported sample images into the target user's
+`$HOME/Pictures` without overwriting existing files. The target system must provide `libc6`,
 `libstdc++6`, `libdrm2`, `libfreetype6`, and `lilygo-ui-appkit-dev >= 0.1.0`.
-When the build uses libjpeg, it also requires `libjpeg62-turbo`. AppKit supplies
+The package requires `libjpeg62-turbo` at runtime. AppKit supplies
 the shared runtime fonts on the device. Package identity and version are
 maintained in [`lpm.toml`](../lpm.toml).
 
@@ -250,5 +264,5 @@ cpack --config build/cm0-cross/CPackConfig.cmake -B dist
 | Homebrew libraries are not found | Configure with `cmake --preset host-simulator -DCMAKE_PREFIX_PATH="$(brew --prefix)"`. |
 | BSP download fails | Check access to GitHub releases and available disk space, then rerun configuration. |
 | Photos do not appear, or only samples appear | Check source directory overrides, permissions, supported formats, and the 24-item limit; press refresh. See [images and storage](02-images-and-storage.md). |
-| A JPEG cannot be opened | Check for corrupt or oversized data; the bundled decoder supports baseline JPEGs only. Install libjpeg development files and reconfigure to use libjpeg. |
+| A JPEG cannot be opened | Check for corrupt or oversized data. Gallery uses LVGL's libjpeg-turbo decoder and accepts baseline and progressive JPEGs; rebuild if the target development package is missing. |
 | A sample cannot be deleted | Samples, including files selected by a sample-directory override, are intentionally read-only. |

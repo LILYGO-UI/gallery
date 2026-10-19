@@ -6,9 +6,10 @@
 
 | Collection | Default directory | Environment override | Access in Gallery |
 | --- | --- | --- | --- |
-| Camera | `/root/photos` | `LILYGO_GALLERY_PHOTO_DIR` | Browse and delete |
-| Screenshots | `/root/screenshots` | `LILYGO_GALLERY_SCREENSHOT_DIR` | Browse and delete |
-| Samples | `/usr/share/lilygo-ui-gallery/gallery` | `LILYGO_GALLERY_SAMPLE_DIR` | Read-only |
+| Camera | `$HOME/Camera` | `LILYGO_GALLERY_PHOTO_DIR` | Browse and delete |
+| Pictures | `$HOME/Pictures` | `LILYGO_GALLERY_PICTURES_DIR` | Browse and delete |
+| Screenshots | `$HOME/screenshots` | `LILYGO_GALLERY_SCREENSHOT_DIR` | Browse and delete |
+| Samples | explicit `LILYGO_GALLERY_SAMPLE_DIR` or host fallback | `LILYGO_GALLERY_SAMPLE_DIR` | Read-only |
 
 Directories are scanned when the application opens and when the refresh button
 is pressed. Scanning is nonrecursive; unavailable directories are skipped.
@@ -21,6 +22,7 @@ For host development, launch with your own directories from the repository root:
 
 ```sh
 LILYGO_GALLERY_PHOTO_DIR=/path/to/photos \
+LILYGO_GALLERY_PICTURES_DIR=/path/to/pictures \
 LILYGO_GALLERY_SCREENSHOT_DIR=/path/to/screenshots \
 LILYGO_GALLERY_SAMPLE_DIR=/path/to/sample/gallery \
   lpm start --foreground
@@ -38,10 +40,15 @@ read-only in Gallery.
 ## Packaged Samples and Host Fallback
 
 The repository includes PNG, JPEG, GIF, and PPM examples under
-[`assets/gallery`](../assets/gallery). CMake installs them to
-`/usr/share/lilygo-ui-gallery/gallery` with the device preset. Supported packaged
-samples are scanned alongside camera photos and screenshots and can be browsed
-without either of those directories. They remain read-only.
+[`assets/gallery`](../assets/gallery). The Debian package keeps these files in
+`/usr/share/lilygo-ui-gallery/gallery` as its import source and copies supported
+images to the installing user's `$HOME/Pictures` without overwriting existing
+files. The copied files are writable gallery items and can be deleted. The
+application also performs the same one-time import at first launch when the
+package was installed before the user's home directory was available.
+
+An explicit `LILYGO_GALLERY_SAMPLE_DIR` still adds a read-only sample directory,
+which is useful for development and rendering tests.
 
 For a host simulator build, CMake also records the absolute path to the
 repository's `assets/gallery/` directory. If the regular source scans find no
@@ -62,17 +69,16 @@ not disable fallback.
 
 | Format | Support |
 | --- | --- |
-| JPEG (`.jpg`, `.jpeg`) | Uses libjpeg when found during configuration; otherwise the bundled LVGL build enables its baseline JPEG decoder |
+| JPEG (`.jpg`, `.jpeg`) | Decoded with libjpeg-turbo, including progressive JPEGs |
 | PNG (`.png`) | Decoded with LVGL's bundled LodePNG, including alpha compositing onto the page background |
 | PPM (`.ppm`) | Binary P6 images with an 8-bit channel maximum of 255, decoded by Gallery |
 | RGB565 (`.thumb.rgb565`) | Separate camera thumbnails, not standalone library entries |
 | GIF (`.gif`) | Included in the asset package for other consumers; not scanned or decoded by Gallery |
 
-File extensions are matched without case sensitivity. The bundled JPEG fallback
-does not add a device package dependency and supports baseline JPEGs only.
-If libjpeg is used, the Debian package declares `libjpeg62-turbo` as an additional
-dependency. A build using an imported LVGL target needs libjpeg for JPEG decoding
-because this project enables the fallback only when building LVGL from source.
+File extensions are matched without case sensitivity. JPEG decoding is a required
+build dependency and the Debian package declares `libjpeg62-turbo` as a runtime
+dependency. The decoder accepts both baseline and progressive JPEG files and
+keeps the existing input-size and source-pixel limits.
 
 Camera photos can have a sibling thumbnail using the same filename stem, such
 as `photo.jpg` and `photo.thumb.rgb565`. It must contain exactly `360 x 640`
@@ -95,9 +101,13 @@ collection filters both its grid and subsequent viewer navigation.
 Tap a grid image to enter the viewer. Use the filmstrip, previous/next buttons,
 or horizontal swipes to switch photos within the collection. Swipe down to
 return to the grid. Swipe up to reveal the filename, modification time, file
-size, source, and location. The details body scrolls when needed; closing the
-panel restores the viewer controls and filmstrip. On displays shorter than
-400 pixels, the filmstrip is hidden to leave room for the photo.
+size, source, and location; the details button in the viewer controls opens the
+same panel directly. The details body scrolls when needed; closing the panel
+restores the viewer controls and filmstrip. On displays shorter than
+400 pixels, the filmstrip is hidden to leave room for the photo. The viewer's
+plus and minus controls zoom the photo in 25% steps up to the memory-safe
+maximum for the current viewport. While zoomed, drag the photo to inspect
+other regions; horizontal and vertical viewer swipes are reserved for panning.
 
 Deleting a writable photo opens a bottom action sheet with Delete Photo and
 Cancel actions. Confirmation permanently removes the original file; it does
