@@ -6,18 +6,23 @@ Model、ViewModel 和 LVGL View。
 
 ## 数据与行为
 
-- 默认读取当前用户的 `$HOME/Camera`、`$HOME/Pictures` 和 `$HOME/screenshots`。
+- 默认读取相机的 `CAMERA_OUTPUT_DIR`（未设置时为 `$HOME/Camera`）、`$HOME/Pictures` 和 `$HOME/screenshots`。
   Debian 安装包会把内置示例导入 `$HOME/Pictures`；安装包内的
   `/usr/share/lilygo-ui-gallery/gallery` 仅作为导入源。
-- 支持 JPEG、PNG、PPM，以及相机生成的 `360x640` RGB565 缩略图。
+- 支持 JPEG、PNG、PPM、相机生成的 H.264 MP4 录像，以及 `360x640` RGB565 缩略图。
+  视频缺少缩略图时，首次显示会从首帧生成同名 `.thumb.rgb565` 缓存。
 - 合并来源目录后按修改时间倒序排列，最多展示 24 项。
 - 底部 Library / Albums 标签切换图库与相册；页面顶部显示大标题和照片数量。
 - Albums 显示 All Photos、Camera、Screenshots 和 Samples 的封面与数量，点击后
   按真实来源筛选网格；查看器切换照片时保留当前筛选范围。
-- 网格点击后进入浅色全屏查看器，以完整适配方式显示照片，上方显示文件修改日期
-  和文件名；可点选底部缩略图胶卷、使用前后按钮或横向滑动切换照片。
-- 删除前显示底部操作面板，明确提示永久删除；删除相机照片时同步删除独立的
-  `.thumb.rgb565` 文件。示例照片只读，删除按钮不可用。
+- 网格点击后进入浅色全屏查看器，以完整适配方式显示照片或播放 MP4 录像，上方显示
+  文件修改日期和文件名；视频自动播放并输出文件中的音轨，控制栏支持暂停/继续、拖动
+  进度跳转和 0–100% 音量。全屏模式隐藏 Gallery 顶栏、胶卷和详情/删除操作，保留
+  上一项/下一项、播放、音量和退出全屏控件。AppKit 系统栏继续显示；没有音轨的录像
+  仍然静音。可点选底部
+  缩略图胶卷、使用前后按钮或横向滑动切换媒体。
+- 删除前显示底部操作面板，明确提示永久删除；删除媒体时同步删除独立的
+  `.thumb.rgb565` 文件。示例媒体只读，删除按钮不可用。
 - 刷新按钮重新扫描目录，新拍摄的照片无需重启应用即可出现。
 
 主机模拟器可用 `LILYGO_GALLERY_PHOTO_DIR`、`LILYGO_GALLERY_PICTURES_DIR`、
@@ -30,6 +35,7 @@ Model、ViewModel 和 LVGL View。
 src/pages/gallery/gallery_model.*       目录扫描、排序、选择和删除
 src/pages/gallery/gallery_view_model.*  展示模式、命令和 LVGL Subject
 src/pages/gallery/gallery_image.*       PNG/JPEG/PPM/RGB565 解码与缩放
+src/services/video_player.*             libmpv MP4 播放、首帧抓取与软件渲染
 src/pages/gallery/gallery_view.*        网格、查看器、手势和删除确认层
 src/app.*                               AppKit 生命周期与页面装配
 ```

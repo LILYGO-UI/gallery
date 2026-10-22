@@ -4,13 +4,17 @@
 
 #include <algorithm>
 #include <cassert>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <ctime>
 #include <fstream>
 #include <string>
+#include <thread>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <utime.h>
 #include <vector>
 
 namespace {
@@ -158,11 +162,111 @@ void assert_within_display(lv_obj_t *object, int width, int height)
     assert(area.x2 >= area.x1 && area.y2 >= area.y1);
 }
 
+std::size_t timer_count()
+{
+    std::size_t count = 0;
+    for (auto *timer = lv_timer_get_next(nullptr); timer; timer = lv_timer_get_next(timer)) ++count;
+    return count;
+}
+
+bool thumbnail_has_pixels(lv_obj_t *root, unsigned index)
+{
+    const auto name = std::string("gallery_thumbnail_") + std::to_string(index);
+    auto *canvas = lv_obj_find_by_name(root, name.c_str());
+    assert(canvas);
+    const auto *image = lv_canvas_get_image(canvas);
+    assert(image && image->data);
+    return std::any_of(image->data, image->data + image->data_size,
+                       [](std::uint8_t value) { return value != 0; });
+}
+
+void advance_thumbnail_timer(lv_obj_t *root)
+{
+    lv_tick_inc(40);
+    lv_timer_handler();
+    lv_obj_update_layout(root);
+}
+
+void test_deferred_grid_thumbnails(const cm0_app_descriptor_t *descriptor, cm0_app_context_t &context,
+                                   lv_display_t *display, const std::string &parent, int width, int height)
+{
+    const auto directory = parent + "/deferred";
+    assert(::mkdir(directory.c_str(), 0700) == 0);
+    std::vector<std::string> photos;
+    for (unsigned i = 0; i < 3; ++i) {
+        photos.push_back(directory + "/photo-" + std::to_string(i) + ".ppm");
+        write_photo(photos.back(), 180, 20, 10);
+        struct utimbuf times{200 - static_cast<std::time_t>(i), 200 - static_cast<std::time_t>(i)};
+        assert(::utime(photos.back().c_str(), &times) == 0);
+    }
+    const auto video = directory + "/clip.mp4";
+    {
+        std::ofstream file(video, std::ios::binary);
+        file << "recording without a cached thumbnail";
+    }
+    struct utimbuf video_times{100, 100};
+    assert(::utime(video.c_str(), &video_times) == 0);
+    const auto video_thumbnail = gallery_media_thumbnail_path(video);
+    assert(::setenv("LILYGO_GALLERY_PHOTO_DIR", directory.c_str(), 1) == 0);
+    assert(::setenv("LILYGO_GALLERY_SCREENSHOT_DIR", directory.c_str(), 1) == 0);
+    assert(::setenv("LILYGO_GALLERY_PICTURES_DIR", (directory + "/missing-pictures").c_str(), 1) == 0);
+    assert(::setenv("LILYGO_GALLERY_SAMPLE_DIR", (directory + "/missing-samples").c_str(), 1) == 0);
+
+    const auto timers_before_open = timer_count();
+    descriptor->open(&context);
+    lv_obj_update_layout(context.root);
+    for (unsigned i = 0; i < photos.size(); ++i) assert(!thumbnail_has_pixels(context.root, i));
+    assert(::access(video_thumbnail.c_str(), F_OK) != 0);
+    assert(timer_count() == timers_before_open + 2);
+
+    // The first decode must see the file as it exists after open returns.
+    write_photo(photos.front(), 10, 20, 220);
+    advance_thumbnail_timer(context.root);
+    assert(thumbnail_has_pixels(context.root, 0));
+    assert(!thumbnail_has_pixels(context.root, 1));
+    auto *first = lv_obj_find_by_name(context.root, "gallery_thumbnail_0");
+    const auto pixel = lv_canvas_get_px(first, lv_obj_get_width(first) / 2, lv_obj_get_height(first) / 2);
+    assert(pixel.blue > pixel.red && pixel.blue > pixel.green);
+
+    // Reload and rotation replace pending work while keeping one active job.
+    auto *reload = lv_obj_find_by_name(context.root, "gallery_reload");
+    assert(reload);
+    lv_obj_send_event(reload, LV_EVENT_CLICKED, nullptr);
+    lv_obj_update_layout(context.root);
+    for (unsigned i = 0; i < photos.size(); ++i) assert(!thumbnail_has_pixels(context.root, i));
+    assert(timer_count() == timers_before_open + 2);
+    resize_display(display, context.root, height, width);
+    assert(timer_count() == timers_before_open + 2);
+    advance_thumbnail_timer(context.root);
+    assert(thumbnail_has_pixels(context.root, 0));
+    assert(!thumbnail_has_pixels(context.root, 1));
+    first = lv_obj_find_by_name(context.root, "gallery_thumbnail_0");
+    auto *tile = lv_obj_find_by_name(context.root, "gallery_tile_0");
+    assert(lv_obj_get_width(first) == lv_obj_get_width(tile));
+    assert(lv_obj_get_height(first) == lv_obj_get_height(tile));
+    for (unsigned i = 0; i < 4; ++i) advance_thumbnail_timer(context.root);
+    for (unsigned i = 0; i < photos.size(); ++i) assert(thumbnail_has_pixels(context.root, i));
+    assert(timer_count() == timers_before_open + 1);
+    assert(::access(video_thumbnail.c_str(), F_OK) != 0);
+
+    // Closing before a pending decode must remove its callback and buffers.
+    lv_obj_send_event(reload, LV_EVENT_CLICKED, nullptr);
+    assert(timer_count() == timers_before_open + 2);
+    descriptor->close();
+    assert(timer_count() == timers_before_open);
+    advance_thumbnail_timer(context.root);
+    assert(!lv_obj_find_by_name(context.root, "app_surface"));
+    resize_display(display, context.root, width, height);
+    for (const auto &photo : photos) assert(std::remove(photo.c_str()) == 0);
+    assert(std::remove(video.c_str()) == 0);
+    assert(::rmdir(directory.c_str()) == 0);
+}
+
 }  // namespace
 
 int main(int argc, char **argv)
 {
-    assert(argc == 5);
+    assert(argc == 5 || argc == 6);
     const int width  = std::atoi(argv[1]);
     const int height = std::atoi(argv[2]);
     assert(width >= 320 && height >= 240);
@@ -213,6 +317,11 @@ int main(int argc, char **argv)
     cm0_app_context_t context{};
     context.root           = lv_screen_active();
     const auto *descriptor = cm0_app_get_descriptor();
+    test_deferred_grid_thumbnails(descriptor, context, display, directory, width, height);
+    assert(::setenv("LILYGO_GALLERY_PHOTO_DIR", directory.c_str(), 1) == 0);
+    assert(::setenv("LILYGO_GALLERY_PICTURES_DIR", pictures_directory.c_str(), 1) == 0);
+    assert(::setenv("LILYGO_GALLERY_SCREENSHOT_DIR", directory.c_str(), 1) == 0);
+    assert(::setenv("LILYGO_GALLERY_SAMPLE_DIR", (directory + "/missing-samples").c_str(), 1) == 0);
     descriptor->open(&context);
     lv_obj_update_layout(context.root);
 
@@ -236,7 +345,7 @@ int main(int argc, char **argv)
     assert(lv_obj_is_visible(header) && lv_obj_is_visible(tab_bar));
     assert(!lv_obj_is_visible(albums));
 
-    lv_tick_inc(20);
+    for (unsigned i = 0; i < 4; ++i) advance_thumbnail_timer(context.root);
     lv_refr_now(display);
     const bool has_contrast = std::any_of(framebuffer.cbegin() + 1, framebuffer.cend(),
                                           [](const auto &pixel) { return colors_differ(pixel, framebuffer[0]); });
@@ -502,6 +611,7 @@ int main(int argc, char **argv)
     lv_obj_send_event(reload, LV_EVENT_CLICKED, nullptr);
     lv_obj_update_layout(context.root);
     assert(std::string(lv_label_get_text(count)) == "24 photos");
+    for (unsigned i = 0; i < 24; ++i) advance_thumbnail_timer(context.root);
     lv_refr_now(display);
     assert(write_snapshot((std::string(argv[3]) + ".full.ppm").c_str(), width, height));
 
@@ -551,6 +661,88 @@ int main(int argc, char **argv)
     assert(std::string(lv_label_get_text(index)) == "24 / 24");
     lv_group_delete(focus_group);
 
+    if (argc == 6) {
+        const auto video_path = directory + "/video-with-audio.mp4";
+        copy_file(argv[5], video_path);
+        const auto latest_video_time = std::time(nullptr) + 60;
+        struct utimbuf video_times{latest_video_time, latest_video_time};
+        assert(::utime(video_path.c_str(), &video_times) == 0);
+        GalleryModel expected_video(directory, directory, "", "", pictures_directory);
+        expected_video.reload();
+        assert(!expected_video.items().empty() && expected_video.items().front().photo_path == video_path);
+        lv_obj_send_event(back, LV_EVENT_CLICKED, nullptr);
+        assert(lv_obj_is_visible(grid) && !lv_obj_is_visible(viewer));
+        lv_obj_send_event(reload, LV_EVENT_CLICKED, nullptr);
+        lv_obj_update_layout(context.root);
+        for (unsigned i = 24; i > 0; --i) advance_thumbnail_timer(context.root);
+
+        auto *video_tile = lv_obj_find_by_name(context.root, "gallery_tile_0");
+        assert(video_tile);
+        tap(pointer, video_tile);
+        auto *video_top_bar = lv_obj_find_by_name(context.root, "gallery_viewer_header");
+        auto *video_timeline = lv_obj_find_by_name(context.root, "gallery_video_timeline");
+        auto *seek = lv_obj_find_by_name(context.root, "gallery_video_seek");
+        auto *position = lv_obj_find_by_name(context.root, "gallery_video_position");
+        auto *duration = lv_obj_find_by_name(context.root, "gallery_video_duration");
+        auto *actions = lv_obj_find_by_name(context.root, "gallery_video_actions");
+        auto *volume = lv_obj_find_by_name(context.root, "gallery_video_volume");
+        auto *fullscreen = lv_obj_find_by_name(context.root, "gallery_video_fullscreen");
+        auto *video_filmstrip = lv_obj_find_by_name(context.root, "gallery_filmstrip");
+        auto *image_area = lv_obj_find_by_name(context.root, "gallery_viewer_image_area");
+        auto *video_status = lv_obj_find_by_name(context.root, "gallery_viewer_status");
+        auto *video_details = lv_obj_find_by_name(context.root, "gallery_video_details_button");
+        auto *video_delete = lv_obj_find_by_name(context.root, "gallery_video_delete");
+        auto *video_filename = lv_obj_find_by_name(context.root, "gallery_viewer_filename");
+        assert(video_top_bar && video_timeline && seek && position && duration && actions && volume && fullscreen &&
+               video_filmstrip && image_area && video_status && video_details && video_delete && video_filename);
+        assert(std::string(lv_label_get_text(video_filename)) == "video-with-audio.mp4");
+        assert(lv_obj_is_visible(video_timeline) && lv_obj_is_visible(actions));
+
+        for (int attempt = 0; attempt < 100 &&
+                                (std::string(lv_label_get_text(duration)) == "0:00" ||
+                                 lv_obj_is_visible(video_status));
+             ++attempt) {
+            lv_tick_inc(25);
+            lv_timer_handler();
+            lv_obj_update_layout(context.root);
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        assert(std::string(lv_label_get_text(duration)) == "0:03");
+        assert(!lv_obj_is_visible(video_status));
+        assert(!lv_obj_has_state(seek, LV_STATE_DISABLED));
+        lv_refr_now(display);
+        assert(write_snapshot((std::string(argv[3]) + ".video-controls.ppm").c_str(), width, height));
+
+        lv_obj_add_state(seek, LV_STATE_PRESSED);
+        lv_slider_set_value(seek, 5000, LV_ANIM_OFF);
+        lv_obj_remove_state(seek, LV_STATE_PRESSED);
+        lv_obj_send_event(seek, LV_EVENT_RELEASED, nullptr);
+        assert(lv_slider_get_value(seek) == 5000);
+        assert(std::string(lv_label_get_text(position)) != "0:00");
+
+        lv_obj_add_state(volume, LV_STATE_PRESSED);
+        lv_slider_set_value(volume, 37, LV_ANIM_OFF);
+        lv_obj_send_event(volume, LV_EVENT_VALUE_CHANGED, nullptr);
+        lv_obj_remove_state(volume, LV_STATE_PRESSED);
+        assert(lv_slider_get_value(volume) == 37);
+
+        const auto image_height = lv_obj_get_height(image_area);
+        lv_obj_send_event(fullscreen, LV_EVENT_CLICKED, nullptr);
+        lv_obj_update_layout(context.root);
+        assert(!lv_obj_is_visible(video_top_bar) && !lv_obj_is_visible(video_filmstrip));
+        assert(!lv_obj_is_visible(video_details) && !lv_obj_is_visible(video_delete));
+        assert(lv_obj_is_visible(video_timeline) && lv_obj_is_visible(actions));
+        assert(lv_obj_get_height(image_area) > image_height);
+        lv_refr_now(display);
+        assert(write_snapshot((std::string(argv[3]) + ".video-fullscreen.ppm").c_str(), width, height));
+        lv_obj_send_event(fullscreen, LV_EVENT_CLICKED, nullptr);
+        lv_obj_update_layout(context.root);
+        assert(lv_obj_is_visible(video_top_bar) && lv_obj_is_visible(video_filmstrip));
+        descriptor->close();
+        assert(std::remove(video_path.c_str()) == 0);
+        assert(std::remove(gallery_media_thumbnail_path(video_path).c_str()) == 0);
+    }
+
     descriptor->close();
 #ifdef GALLERY_DEVELOPMENT_SAMPLE_DIR
     // Open the actual app without a sample override, as a developer would.
@@ -566,6 +758,7 @@ int main(int argc, char **argv)
     lv_obj_update_layout(context.root);
     count = lv_obj_find_by_name(context.root, "gallery_count");
     assert(std::string(lv_label_get_text(count)) == std::to_string(expected_samples.items().size()) + " photos");
+    for (std::size_t i = 0; i < expected_samples.items().size(); ++i) advance_thumbnail_timer(context.root);
     lv_refr_now(display);
     assert(write_snapshot((std::string(argv[3]) + ".host-samples.ppm").c_str(), width, height));
     tap(pointer, lv_obj_find_by_name(context.root, "gallery_thumbnail_0"));

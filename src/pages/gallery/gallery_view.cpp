@@ -8,8 +8,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <ctime>
+#include <memory>
 #include <string>
 
 namespace {
@@ -17,11 +19,19 @@ namespace {
 constexpr std::int32_t kGridGap            = 2;
 constexpr std::int32_t kViewerHeaderHeight = 76;
 constexpr std::int32_t kFilmstripHeight    = 60;
-constexpr std::int32_t kControlBarHeight   = 64;
+constexpr std::int32_t kPhotoControlBarHeight = 64;
+constexpr std::int32_t kVideoTimelineHeight = 40;
+constexpr std::int32_t kVideoActionsHeight = 56;
 constexpr std::int32_t kAlbumGap           = 20;
 constexpr float kViewerZoomStep              = 0.25F;
 constexpr float kViewerMaximumZoom           = 3.0F;
 constexpr std::uint64_t kViewerMaximumPixels = 2U * 1024U * 1024U;
+constexpr std::uint32_t kVideoPlaceholderColor = 0x20252b;
+// Spread image decoding across UI turns so opening Gallery does not synchronously
+// decode every original photo in the library.
+constexpr std::size_t kDeferredGridThumbnailBatch = 1;
+constexpr std::uint32_t kDeferredGridThumbnailPeriodMs = 32;
+constexpr int kVideoSeekSliderMaximum = 10000;
 using Collection                             = GalleryViewModel::Collection;
 
 void set_font(lv_obj_t *object, std::uint32_t size)
@@ -156,10 +166,56 @@ std::string photo_date(std::int64_t timestamp, bool include_time = false)
 
 void set_hidden(lv_obj_t *object, bool hidden)
 {
+    if (!object) return;
     if (hidden)
         lv_obj_add_flag(object, LV_OBJ_FLAG_HIDDEN);
     else
         lv_obj_remove_flag(object, LV_OBJ_FLAG_HIDDEN);
+}
+
+std::string format_video_time(double seconds)
+{
+    if (!std::isfinite(seconds) || seconds < 0.0) seconds = 0.0;
+    const auto total_seconds = static_cast<std::uint64_t>(seconds);
+    const auto hours         = total_seconds / 3600U;
+    const auto minutes       = (total_seconds / 60U) % 60U;
+    const auto remainder     = total_seconds % 60U;
+    char text[32]{};
+    if (hours > 0)
+        std::snprintf(text, sizeof(text), "%llu:%02llu:%02llu", static_cast<unsigned long long>(hours),
+                      static_cast<unsigned long long>(minutes), static_cast<unsigned long long>(remainder));
+    else
+        std::snprintf(text, sizeof(text), "%llu:%02llu", static_cast<unsigned long long>(total_seconds / 60U),
+                      static_cast<unsigned long long>(remainder));
+    return text;
+}
+
+void style_video_slider(lv_obj_t *slider)
+{
+    lv_obj_set_height(slider, 10);
+    lv_obj_set_style_bg_color(slider, lv_color_hex(components::color_border), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(slider, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(slider, lv_color_hex(components::color_navigation_accent), LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(slider, lv_color_hex(components::color_container_title), LV_PART_KNOB);
+    lv_obj_set_style_pad_all(slider, 5, LV_PART_KNOB);
+    lv_obj_set_ext_click_area(slider, 16);
+}
+
+void fill_video_placeholder(std::vector<std::uint8_t> &pixels, std::int32_t width, std::int32_t height)
+{
+    if (width < 1 || height < 1) {
+        pixels.clear();
+        return;
+    }
+    pixels.resize(static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 2U);
+    const auto red   = (kVideoPlaceholderColor >> 16U) & 0xffU;
+    const auto green = (kVideoPlaceholderColor >> 8U) & 0xffU;
+    const auto blue  = kVideoPlaceholderColor & 0xffU;
+    const auto value = static_cast<std::uint16_t>(((red & 0xf8U) << 8U) | ((green & 0xfcU) << 3U) | (blue >> 3U));
+    for (std::size_t offset = 0; offset + 1 < pixels.size(); offset += 2) {
+        pixels[offset]     = static_cast<std::uint8_t>(value & 0xffU);
+        pixels[offset + 1] = static_cast<std::uint8_t>(value >> 8U);
+    }
 }
 
 float maximum_viewer_zoom(std::int32_t width, std::int32_t height)
@@ -226,6 +282,9 @@ lv_obj_t *GalleryView::create(lv_obj_t *parent, const char *application_name)
     create_tabs();
     create_viewer();
     create_delete_confirmation();
+    video_player_ = std::make_unique<GalleryVideoPlayer>();
+    thumbnail_player_ = std::make_unique<GalleryVideoPlayer>(true);
+    playback_timer_ = lv_timer_create(playback_timer_event, 20, this);
     display_ = lv_obj_get_display(surface_);
     lv_display_add_event_cb(display_, layout_completed_event, LV_EVENT_UPDATE_LAYOUT_COMPLETED, this);
     lv_obj_add_event_cb(surface_, size_changed_event, LV_EVENT_SIZE_CHANGED, this);
@@ -238,6 +297,14 @@ lv_obj_t *GalleryView::create(lv_obj_t *parent, const char *application_name)
 
 void GalleryView::destroy() noexcept
 {
+    cancel_deferred_thumbnail_render();
+    if (playback_timer_) {
+        lv_timer_delete(playback_timer_);
+        playback_timer_ = nullptr;
+    }
+    stop_video();
+    video_player_.reset();
+    thumbnail_player_.reset();
     if (display_) lv_display_remove_event_cb_with_user_data(display_, layout_completed_event, this);
     display_ = nullptr;
     if (surface_) lv_obj_delete(surface_);
@@ -249,6 +316,11 @@ void GalleryView::destroy() noexcept
     surface_ = header_ = header_title_ = header_count_ = body_ = grid_ = albums_ = nullptr;
     tab_bar_ = library_tab_ = albums_tab_ = nullptr;
     viewer_ = viewer_top_bar_ = viewer_canvas_ = viewer_date_ = viewer_filename_ = viewer_status_ = nullptr;
+    video_toggle_button_ = video_toggle_icon_ = nullptr;
+    video_timeline_ = video_position_ = video_seek_slider_ = video_duration_ = nullptr;
+    viewer_actions_ = video_previous_button_ = video_next_button_ = video_details_button_ = nullptr;
+    video_delete_button_ = video_volume_icon_ = video_volume_slider_ = nullptr;
+    video_fullscreen_button_ = video_fullscreen_icon_ = nullptr;
     viewer_zoom_controls_ = viewer_zoom_label_ = nullptr;
     viewer_controls_ = viewer_details_ = viewer_details_body_ = viewer_detail_text_ = nullptr;
     viewer_index_ = filmstrip_ = previous_button_ = next_button_ = delete_button_ = nullptr;
@@ -258,7 +330,12 @@ void GalleryView::destroy() noexcept
     restore_scroll_                   = false;
     pan_start_x_ = pan_start_y_ = viewer_pan_x_ = viewer_pan_y_ = 0;
     viewer_zoom_ = 1.0F;
+    video_bgr_frame_.clear();
+    video_frame_.clear();
+    video_thumbnail_failures_.clear();
+    video_playback_ = {};
     showing_albums_ = albums_tab_active_ = applying_layout_ = swipe_pressed_ = pan_active_ = details_visible_ = false;
+    video_fullscreen_ = false;
 }
 
 void GalleryView::create_header_actions()
@@ -367,6 +444,32 @@ void GalleryView::create_viewer()
     lv_obj_set_style_text_align(viewer_status_, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_center(viewer_status_);
 
+    video_timeline_ = lv_obj_create(viewer_);
+    lv_obj_set_name_static(video_timeline_, "gallery_video_timeline");
+    style_transparent_container(video_timeline_);
+    lv_obj_set_size(video_timeline_, LV_PCT(100), kVideoTimelineHeight);
+    lv_obj_set_style_pad_hor(video_timeline_, 16, 0);
+    lv_obj_set_style_pad_column(video_timeline_, 8, 0);
+    lv_obj_set_flex_flow(video_timeline_, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(video_timeline_, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    video_position_ = create_label(video_timeline_, "0:00", 14, components::color_muted_text);
+    lv_obj_set_name_static(video_position_, "gallery_video_position");
+    lv_obj_set_width(video_position_, 48);
+    lv_obj_set_style_text_align(video_position_, LV_TEXT_ALIGN_LEFT, 0);
+    video_seek_slider_ = lv_slider_create(video_timeline_);
+    lv_obj_set_name_static(video_seek_slider_, "gallery_video_seek");
+    lv_obj_set_width(video_seek_slider_, 0);
+    lv_obj_set_flex_grow(video_seek_slider_, 1);
+    style_video_slider(video_seek_slider_);
+    lv_slider_set_range(video_seek_slider_, 0, kVideoSeekSliderMaximum);
+    lv_obj_add_event_cb(video_seek_slider_, video_seek_event, LV_EVENT_RELEASED, this);
+    lv_obj_add_event_cb(video_seek_slider_, video_seek_event, LV_EVENT_PRESS_LOST, this);
+    video_duration_ = create_label(video_timeline_, "0:00", 14, components::color_muted_text);
+    lv_obj_set_name_static(video_duration_, "gallery_video_duration");
+    lv_obj_set_width(video_duration_, 48);
+    lv_obj_set_style_text_align(video_duration_, LV_TEXT_ALIGN_RIGHT, 0);
+    set_hidden(video_timeline_, true);
+
     viewer_zoom_controls_ = lv_obj_create(image_area);
     lv_obj_set_name_static(viewer_zoom_controls_, "gallery_zoom_controls");
     style_transparent_container(viewer_zoom_controls_);
@@ -403,11 +506,46 @@ void GalleryView::create_viewer()
     lv_obj_set_scrollbar_mode(filmstrip_, LV_SCROLLBAR_MODE_OFF);
     lv_obj_add_event_cb(filmstrip_, content_size_changed_event, LV_EVENT_SIZE_CHANGED, this);
     lv_obj_add_event_cb(filmstrip_, filmstrip_layout_event, LV_EVENT_LAYOUT_CHANGED, this);
+    lv_obj_move_to_index(video_timeline_, lv_obj_get_index(filmstrip_) + 1);
+
+    viewer_actions_ = lv_obj_create(viewer_);
+    lv_obj_set_name_static(viewer_actions_, "gallery_video_actions");
+    style_transparent_container(viewer_actions_);
+    lv_obj_set_size(viewer_actions_, LV_PCT(100), kVideoActionsHeight);
+    lv_obj_set_style_pad_hor(viewer_actions_, 16, 0);
+    lv_obj_set_style_pad_column(viewer_actions_, 10, 0);
+    lv_obj_set_flex_flow(viewer_actions_, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(viewer_actions_, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    set_hidden(viewer_actions_, true);
+    video_previous_button_ = create_button(viewer_actions_, LV_SYMBOL_LEFT, components::color_container_title,
+                                           previous_event, this, "gallery_video_previous");
+    video_toggle_button_ = create_button(viewer_actions_, LV_SYMBOL_PLAY, components::color_container_title,
+                                         video_toggle_event, this, "gallery_video_toggle");
+    video_toggle_icon_ = lv_obj_get_child(video_toggle_button_, 0);
+    video_next_button_ = create_button(viewer_actions_, LV_SYMBOL_RIGHT, components::color_container_title,
+                                       next_event, this, "gallery_video_next");
+    video_volume_icon_ = create_label(viewer_actions_, LV_SYMBOL_VOLUME_MAX, 22, components::color_container_title);
+    lv_obj_set_name_static(video_volume_icon_, "gallery_video_volume_icon");
+    video_volume_slider_ = lv_slider_create(viewer_actions_);
+    lv_obj_set_name_static(video_volume_slider_, "gallery_video_volume");
+    lv_obj_set_width(video_volume_slider_, 0);
+    lv_obj_set_flex_grow(video_volume_slider_, 1);
+    style_video_slider(video_volume_slider_);
+    lv_slider_set_range(video_volume_slider_, 0, 100);
+    lv_slider_set_value(video_volume_slider_, 100, LV_ANIM_OFF);
+    lv_obj_add_event_cb(video_volume_slider_, video_volume_event, LV_EVENT_VALUE_CHANGED, this);
+    video_fullscreen_button_ = create_button(viewer_actions_, "\xef\x81\xa5", components::color_container_title,
+                                             video_fullscreen_event, this, "gallery_video_fullscreen");
+    video_fullscreen_icon_ = lv_obj_get_child(video_fullscreen_button_, 0);
+    video_details_button_ = create_button(viewer_actions_, LV_SYMBOL_LIST, components::color_container_title,
+                                          details_event, this, "gallery_video_details_button");
+    video_delete_button_ = create_button(viewer_actions_, LV_SYMBOL_TRASH, components::color_container_title,
+                                         delete_event, this, "gallery_video_delete");
 
     auto *controls = viewer_controls_ = lv_obj_create(viewer_);
     lv_obj_set_name_static(controls, "gallery_viewer_controls");
     style_transparent_container(controls);
-    lv_obj_set_size(controls, LV_PCT(100), kControlBarHeight);
+    lv_obj_set_size(controls, LV_PCT(100), kPhotoControlBarHeight);
     lv_obj_set_style_pad_hor(controls, 16, 0);
     lv_obj_set_style_pad_column(controls, 10, 0);
     lv_obj_set_flex_flow(controls, LV_FLEX_FLOW_ROW);
@@ -500,17 +638,17 @@ void GalleryView::create_delete_confirmation()
     lv_obj_set_style_pad_row(panel, 10, 0);
     lv_obj_set_flex_flow(panel, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(panel, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    create_label(panel, "Delete this photo?", 18, components::color_container_title);
+    create_label(panel, "Delete this item?", 18, components::color_container_title);
     auto *description =
-        create_label(panel, "This photo will be permanently deleted.", 14, components::color_muted_text);
+        create_label(panel, "This item will be permanently deleted.", 14, components::color_muted_text);
     lv_obj_set_width(description, LV_PCT(90));
     lv_obj_set_style_text_align(description, LV_TEXT_ALIGN_CENTER, 0);
-    delete_error_ = create_label(panel, "Could not delete photo. Try again.", 14, components::color_destructive);
+    delete_error_ = create_label(panel, "Could not delete item. Try again.", 14, components::color_destructive);
     lv_obj_set_name_static(delete_error_, "gallery_delete_error");
     lv_obj_set_width(delete_error_, LV_PCT(90));
     lv_obj_set_style_text_align(delete_error_, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_add_flag(delete_error_, LV_OBJ_FLAG_HIDDEN);
-    auto *confirm = create_button(panel, "Delete Photo", components::color_destructive, confirm_delete_event, this,
+    auto *confirm = create_button(panel, "Delete Item", components::color_destructive, confirm_delete_event, this,
                                   "gallery_delete_confirm");
     lv_obj_set_size(confirm, LV_PCT(100), 56);
     lv_obj_set_style_radius(confirm, 0, 0);
@@ -528,6 +666,8 @@ void GalleryView::create_delete_confirmation()
 void GalleryView::rebuild_grid()
 {
     if (!grid_) return;
+    cancel_deferred_thumbnail_render();
+    deferred_thumbnail_index_ = 0;
     const auto scroll_y = lv_obj_get_scroll_y(grid_);
     lv_obj_clean(grid_);
     thumbnails_.clear();
@@ -554,7 +694,7 @@ void GalleryView::rebuild_grid()
     lv_obj_set_flex_align(grid_, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
     thumbnails_.reserve(items.size());
     for (std::size_t index = 0; index < items.size(); ++index) {
-        thumbnails_.push_back({this, index, nullptr, nullptr, {}});
+        thumbnails_.push_back({this, index, nullptr, nullptr, nullptr, {}});
         auto &thumbnail = thumbnails_.back();
         thumbnail.tile  = lv_button_create(grid_);
         const auto name = std::string("gallery_tile_") + std::to_string(index);
@@ -569,6 +709,10 @@ void GalleryView::rebuild_grid()
         auto *placeholder = create_label(thumbnail.tile, LV_SYMBOL_IMAGE, 28, components::color_muted_text);
         lv_obj_center(placeholder);
         lv_obj_add_flag(placeholder, LV_OBJ_FLAG_HIDDEN);
+        if (items[index].kind == GalleryMediaKind::video) {
+            thumbnail.play_icon = create_label(thumbnail.tile, LV_SYMBOL_PLAY, 28, components::color_action);
+            lv_obj_center(thumbnail.play_icon);
+        }
     }
     auto *summary = lv_obj_create(grid_);
     style_transparent_container(summary);
@@ -588,21 +732,97 @@ void GalleryView::resize_grid()
 {
     // Resize existing tiles after the grid receives its own dimensions. Keeping the
     // objects alive preserves focus and scroll state during a display rotation.
-    const auto available = std::max<std::int32_t>(1, lv_obj_get_content_width(grid_));
+    const auto content_width = lv_obj_get_content_width(grid_);
+    if (content_width <= 1 || thumbnails_.empty()) return;
+    const auto available = content_width;
     const auto columns   = available >= 1000 ? 6 : available >= 700 ? 4 : 3;
     const auto side      = std::max<std::int32_t>(1, (available - (columns - 1) * kGridGap) / columns);
     const auto remainder = std::max<std::int32_t>(0, available - columns * side - (columns - 1) * kGridGap);
     const auto &items    = view_model_.items();
+    bool dimensions_changed = false;
     for (auto &thumbnail : thumbnails_) {
         if (thumbnail.index >= items.size()) continue;
         const auto width = side + (static_cast<std::int32_t>(thumbnail.index % columns) < remainder ? 1 : 0);
         lv_obj_set_size(thumbnail.tile, width, side);
-        const bool loaded = gallery_render_image(items[thumbnail.index].thumbnail_path, width, side,
-                                                 GalleryImageFit::cover, thumbnail.pixels);
-        lv_canvas_set_buffer(thumbnail.canvas, thumbnail.pixels.data(), width, side, LV_COLOR_FORMAT_RGB565);
-        lv_obj_invalidate(thumbnail.canvas);
-        set_hidden(lv_obj_get_child(thumbnail.tile, 1), loaded);
+        if (thumbnail.width != width || thumbnail.height != side) {
+            thumbnail.width = width;
+            thumbnail.height = side;
+            thumbnail.rendered = false;
+            thumbnail.pixels.clear();
+            dimensions_changed = true;
+        }
+        const bool video = items[thumbnail.index].kind == GalleryMediaKind::video;
+        if (!thumbnail.rendered) {
+            if (video) fill_video_placeholder(thumbnail.pixels, width, side);
+            else thumbnail.pixels.assign(static_cast<std::size_t>(width) * static_cast<std::size_t>(side) * 2U, 0);
+            lv_canvas_set_buffer(thumbnail.canvas, thumbnail.pixels.data(), width, side, LV_COLOR_FORMAT_RGB565);
+            set_hidden(lv_obj_get_child(thumbnail.tile, 1), video);
+        }
+        if (thumbnail.play_icon) set_hidden(thumbnail.play_icon, !video);
     }
+
+    if (dimensions_changed) {
+        cancel_deferred_thumbnail_render();
+        deferred_thumbnail_index_ = 0;
+    }
+    if (!lv_obj_has_flag(grid_, LV_OBJ_FLAG_HIDDEN) && deferred_thumbnail_index_ < thumbnails_.size())
+        schedule_deferred_thumbnail_render();
+}
+
+void GalleryView::render_grid_thumbnail(ThumbnailWidget &thumbnail, std::int32_t width, std::int32_t height)
+{
+    const auto &items = view_model_.items();
+    if (thumbnail.index >= items.size() || width < 1 || height < 1) return;
+    const auto &item = items[thumbnail.index];
+    const bool video = item.kind == GalleryMediaKind::video;
+    bool loaded = false;
+    if (!video) {
+        loaded = render_item_thumbnail(item, width, height, thumbnail.pixels);
+    } else if (!item.thumbnail_path.empty() && item.thumbnail_path != item.photo_path) {
+        // Opening the library must never start libmpv or synchronously create a
+        // video sidecar. Camera supplied sidecars are safe to decode here.
+        loaded = gallery_render_image(item.thumbnail_path, static_cast<std::uint32_t>(width),
+                                      static_cast<std::uint32_t>(height), GalleryImageFit::cover, thumbnail.pixels);
+    }
+    if (!loaded && video) fill_video_placeholder(thumbnail.pixels, width, height);
+    if (thumbnail.pixels.empty())
+        thumbnail.pixels.assign(static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 2U, 0);
+    lv_canvas_set_buffer(thumbnail.canvas, thumbnail.pixels.data(), width, height, LV_COLOR_FORMAT_RGB565);
+    lv_obj_invalidate(thumbnail.canvas);
+    set_hidden(lv_obj_get_child(thumbnail.tile, 1), loaded || video);
+    if (thumbnail.play_icon) set_hidden(thumbnail.play_icon, !video);
+    thumbnail.width    = width;
+    thumbnail.height   = height;
+    thumbnail.rendered = true;
+}
+
+void GalleryView::cancel_deferred_thumbnail_render() noexcept
+{
+    if (thumbnail_timer_) {
+        lv_timer_delete(thumbnail_timer_);
+        thumbnail_timer_ = nullptr;
+    }
+}
+
+void GalleryView::schedule_deferred_thumbnail_render()
+{
+    if (!thumbnail_timer_ && deferred_thumbnail_index_ < thumbnails_.size())
+        thumbnail_timer_ = lv_timer_create(deferred_thumbnail_timer_event, kDeferredGridThumbnailPeriodMs, this);
+}
+
+void GalleryView::render_deferred_thumbnail_batch()
+{
+    if (!grid_ || lv_obj_has_flag(grid_, LV_OBJ_FLAG_HIDDEN)) return;
+    const auto &items = view_model_.items();
+    std::size_t rendered = 0;
+    while (deferred_thumbnail_index_ < thumbnails_.size() && rendered < kDeferredGridThumbnailBatch) {
+        auto &thumbnail = thumbnails_[deferred_thumbnail_index_++];
+        if (thumbnail.index >= items.size()) continue;
+        if (!thumbnail.rendered)
+            render_grid_thumbnail(thumbnail, lv_obj_get_width(thumbnail.tile), lv_obj_get_height(thumbnail.tile));
+        ++rendered;
+    }
+    if (deferred_thumbnail_index_ >= thumbnails_.size()) cancel_deferred_thumbnail_render();
 }
 
 void GalleryView::rebuild_albums()
@@ -637,11 +857,15 @@ void GalleryView::rebuild_albums()
         const auto found  = std::find_if(items.begin(), items.end(),
                                          [&](const auto &item) { return belongs_to(item, album.collection); });
         if (found != items.end()) {
-            const bool loaded =
-                gallery_render_image(found->thumbnail_path, width, width, GalleryImageFit::cover, album.pixels);
+            const bool video  = found->kind == GalleryMediaKind::video;
+            const bool loaded = render_item_thumbnail(*found, width, width, album.pixels);
+            if (!loaded && video) fill_video_placeholder(album.pixels, width, width);
             auto *canvas = lv_canvas_create(cover);
             lv_canvas_set_buffer(canvas, album.pixels.data(), width, width, LV_COLOR_FORMAT_RGB565);
-            if (!loaded) lv_obj_center(create_label(cover, LV_SYMBOL_IMAGE, 36, components::color_muted_text));
+            if (video)
+                lv_obj_center(create_label(cover, LV_SYMBOL_PLAY, 36, components::color_action));
+            else if (!loaded)
+                lv_obj_center(create_label(cover, LV_SYMBOL_IMAGE, 36, components::color_muted_text));
         } else {
             album.pixels.clear();
             lv_obj_center(create_label(cover, LV_SYMBOL_IMAGE, 36, components::color_muted_text));
@@ -674,7 +898,9 @@ void GalleryView::resize_albums()
         const auto found  = std::find_if(items.begin(), items.end(),
                                          [&](const auto &item) { return belongs_to(item, album.collection); });
         if (found == items.end()) continue;
-        (void)gallery_render_image(found->thumbnail_path, width, width, GalleryImageFit::cover, album.pixels);
+        if (!render_item_thumbnail(*found, width, width, album.pixels) &&
+            found->kind == GalleryMediaKind::video)
+            fill_video_placeholder(album.pixels, width, width);
         lv_canvas_set_buffer(canvas, album.pixels.data(), width, width, LV_COLOR_FORMAT_RGB565);
         lv_obj_invalidate(canvas);
     }
@@ -690,7 +916,7 @@ void GalleryView::rebuild_filmstrip()
     lv_obj_set_flex_align(filmstrip_, fits ? LV_FLEX_ALIGN_CENTER : LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
     for (std::size_t i = 0; i < items.size(); ++i) {
-        filmstrip_thumbnails_.push_back({this, i, nullptr, nullptr, {}});
+        filmstrip_thumbnails_.push_back({this, i, nullptr, nullptr, nullptr, {}});
         auto &thumbnail = filmstrip_thumbnails_.back();
         thumbnail.tile  = lv_button_create(filmstrip_);
         lv_obj_remove_style_all(thumbnail.tile);
@@ -706,14 +932,21 @@ void GalleryView::rebuild_filmstrip()
         lv_obj_set_style_opa(thumbnail.tile, LV_OPA_COVER, LV_STATE_CHECKED);
         lv_obj_add_event_cb(thumbnail.tile, thumbnail_event, LV_EVENT_CLICKED, &thumbnail);
         thumbnail.canvas = lv_canvas_create(thumbnail.tile);
-        (void)gallery_render_image(items[i].thumbnail_path, 38, 50, GalleryImageFit::cover, thumbnail.pixels);
+        const bool video  = items[i].kind == GalleryMediaKind::video;
+        const bool loaded = render_item_thumbnail(items[i], 38, 50, thumbnail.pixels);
+        if (!loaded && video) fill_video_placeholder(thumbnail.pixels, 38, 50);
         lv_canvas_set_buffer(thumbnail.canvas, thumbnail.pixels.data(), 38, 50, LV_COLOR_FORMAT_RGB565);
         lv_obj_center(thumbnail.canvas);
+        if (video) {
+            thumbnail.play_icon = create_label(thumbnail.tile, LV_SYMBOL_PLAY, 18, components::color_action);
+            lv_obj_center(thumbnail.play_icon);
+        }
     }
 }
 
 void GalleryView::show_grid()
 {
+    stop_video();
     view_model_.show_grid();
     viewer_item_path_.clear();
     viewer_zoom_  = 1.0F;
@@ -730,10 +963,13 @@ void GalleryView::show_grid()
     set_hidden(delete_confirmation_, true);
     update_header();
     lv_obj_update_layout(surface_);
+    schedule_deferred_thumbnail_render();
 }
 
 void GalleryView::show_albums()
 {
+    cancel_deferred_thumbnail_render();
+    stop_video();
     view_model_.set_collection(Collection::all);
     showing_albums_ = albums_tab_active_ = true;
     details_visible_                     = false;
@@ -755,6 +991,7 @@ void GalleryView::show_viewer()
         show_grid();
         return;
     }
+    cancel_deferred_thumbnail_render();
     set_hidden(header_, true);
     set_hidden(tab_bar_, true);
     set_hidden(grid_, true);
@@ -798,16 +1035,92 @@ void GalleryView::set_viewer_zoom(float zoom)
     render_viewer();
 }
 
+bool GalleryView::render_item_thumbnail(const GalleryItem &item, std::int32_t width, std::int32_t height,
+                                        std::vector<std::uint8_t> &pixels)
+{
+    if (width < 1 || height < 1) {
+        pixels.clear();
+        return false;
+    }
+
+    if (item.kind != GalleryMediaKind::video)
+        return gallery_render_image(item.thumbnail_path, static_cast<std::uint32_t>(width),
+                                    static_cast<std::uint32_t>(height), GalleryImageFit::cover, pixels);
+
+    // A camera supplied sidecar or a sidecar generated during this session is
+    // decoded through the same bounded image path as photo thumbnails.
+    if (!item.thumbnail_path.empty() && item.thumbnail_path != item.photo_path &&
+        gallery_render_image(item.thumbnail_path, static_cast<std::uint32_t>(width),
+                             static_cast<std::uint32_t>(height), GalleryImageFit::cover, pixels))
+        return true;
+
+    const auto sidecar = gallery_media_thumbnail_path(item.photo_path);
+    if (sidecar.empty()) return false;
+    if (!item.read_only && video_thumbnail_failures_.find(item.photo_path) == video_thumbnail_failures_.end()) {
+        if (gallery_generate_video_thumbnail(item.photo_path, sidecar))
+            return gallery_render_image(sidecar, static_cast<std::uint32_t>(width),
+                                        static_cast<std::uint32_t>(height), GalleryImageFit::cover, pixels);
+        video_thumbnail_failures_.insert(item.photo_path);
+    }
+
+    // Packaged samples are read-only, so do not create files next to them.
+    // They still get a live first frame when libmpv is available.
+    if (item.read_only && thumbnail_player_)
+        return thumbnail_player_->capture_thumbnail(item.photo_path, pixels, width, height);
+    return false;
+}
+
 void GalleryView::render_viewer()
 {
     const auto *item = view_model_.selected_item();
     if (!item || !viewer_canvas_) return;
-    if (viewer_item_path_ != item->photo_path) {
+    const bool item_changed = viewer_item_path_ != item->photo_path;
+    if (item_changed) {
+        stop_video();
         viewer_item_path_ = item->photo_path;
         viewer_zoom_      = 1.0F;
         viewer_pan_x_     = 0;
         viewer_pan_y_     = 0;
     }
+    if (item->kind == GalleryMediaKind::video) {
+        set_hidden(viewer_zoom_controls_, true);
+        set_hidden(video_toggle_button_, false);
+        if (item_changed) {
+            video_playback_ = {};
+            video_playback_.state = GalleryVideoPlaybackState::loading;
+            if (video_player_) video_player_->load(item->photo_path);
+            lv_obj_update_layout(surface_);
+            auto *area = lv_obj_get_parent(viewer_canvas_);
+            const auto width = std::max<std::int32_t>(1, std::min(1920, lv_obj_get_content_width(area)));
+            const auto height = std::max<std::int32_t>(1, std::min(1920, lv_obj_get_content_height(area)));
+            fill_video_placeholder(video_frame_, width, height);
+            lv_canvas_set_buffer(viewer_canvas_, video_frame_.data(), width, height, LV_COLOR_FORMAT_RGB565);
+            lv_obj_set_size(viewer_canvas_, width, height);
+            position_viewer_canvas();
+            lv_label_set_text(viewer_status_, "Loading video...");
+            set_hidden(viewer_status_, false);
+        }
+        lv_label_set_text(viewer_date_, photo_date(item->modified_time).c_str());
+        lv_label_set_text(viewer_filename_, item->filename.c_str());
+        const auto source = item->source == GallerySource::camera        ? "Camera"
+                            : item->source == GallerySource::pictures    ? "Pictures"
+                            : item->source == GallerySource::screenshots ? "Screenshots"
+                                                                         : "Samples (read-only)";
+        const auto details = "Filename: " + item->filename + "\n\nModified: " + photo_date(item->modified_time, true) +
+                             "\nSize: " + std::to_string(item->size_bytes) + " bytes\nSource: " + source +
+                             "\n\nLocation: " + item->photo_path;
+        if (details != lv_label_get_text(viewer_detail_text_)) {
+            lv_label_set_text(viewer_detail_text_, details.c_str());
+            lv_obj_scroll_to_y(viewer_details_body_, 0, LV_ANIM_OFF);
+        }
+        update_video_controls();
+        update_navigation();
+        render_video_frame();
+        return;
+    }
+    stop_video();
+    set_hidden(video_toggle_button_, true);
+    set_hidden(viewer_zoom_controls_, details_visible_);
     lv_obj_update_layout(surface_);
     auto *area        = lv_obj_get_parent(viewer_canvas_);
     const auto width  = std::max<std::int32_t>(1, lv_obj_get_content_width(area));
@@ -851,13 +1164,144 @@ void GalleryView::render_viewer()
     update_navigation();
 }
 
+void GalleryView::stop_video() noexcept
+{
+    if (video_player_) video_player_->stop();
+    video_playback_ = {};
+    video_fullscreen_ = false;
+    video_bgr_frame_.clear();
+    video_frame_.clear();
+    if (viewer_) update_video_controls();
+}
+
+void GalleryView::render_video_frame()
+{
+    if (!video_player_ || !viewer_canvas_ || !view_model_.selected_item() ||
+        view_model_.selected_item()->kind != GalleryMediaKind::video)
+        return;
+    auto *area = lv_obj_get_parent(viewer_canvas_);
+    if (!area) return;
+    lv_obj_update_layout(surface_);
+    const auto width = std::max<std::int32_t>(1, std::min(1920, lv_obj_get_content_width(area)));
+    const auto height = std::max<std::int32_t>(1, std::min(1920, lv_obj_get_content_height(area)));
+    if (!video_player_->render(video_bgr_frame_, width, height)) return;
+
+    // libmpv's software renderer returns BGR0. Convert it to the RGB565 canvas
+    // format expected by LVGL.
+    const auto pixels = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
+    if (video_bgr_frame_.size() < pixels * 4U) return;
+    video_frame_.resize(pixels * 2U);
+    for (std::size_t i = 0; i < pixels; ++i) {
+        const auto blue  = video_bgr_frame_[i * 4U];
+        const auto green = video_bgr_frame_[i * 4U + 1U];
+        const auto red   = video_bgr_frame_[i * 4U + 2U];
+        const auto value = static_cast<std::uint16_t>(((red & 0xf8U) << 8U) | ((green & 0xfcU) << 3U) |
+                                                      (blue >> 3U));
+        video_frame_[i * 2U]     = static_cast<std::uint8_t>(value & 0xffU);
+        video_frame_[i * 2U + 1U] = static_cast<std::uint8_t>(value >> 8U);
+    }
+    lv_canvas_set_buffer(viewer_canvas_, video_frame_.data(), width, height, LV_COLOR_FORMAT_RGB565);
+    lv_obj_set_size(viewer_canvas_, width, height);
+    lv_obj_refr_size(viewer_canvas_);
+    position_viewer_canvas();
+    lv_obj_refr_pos(viewer_canvas_);
+    lv_obj_invalidate(viewer_canvas_);
+    set_hidden(viewer_status_, true);
+    lv_timer_ready(lv_display_get_refr_timer(lv_obj_get_display(viewer_canvas_)));
+}
+
+void GalleryView::update_video_controls() noexcept
+{
+    if (!viewer_) return;
+    const bool video = view_model_.selected_item() && view_model_.selected_item()->kind == GalleryMediaKind::video;
+    const bool show_video_controls = video && !details_visible_;
+    set_hidden(video_timeline_, !show_video_controls);
+    set_hidden(viewer_actions_, !show_video_controls);
+    set_hidden(viewer_controls_, video || details_visible_);
+    set_hidden(video_toggle_button_, !show_video_controls);
+    set_hidden(viewer_top_bar_, video_fullscreen_ && show_video_controls);
+    set_hidden(filmstrip_, video_fullscreen_ || details_visible_ ||
+                              (lv_obj_get_content_height(surface_) > 0 && lv_obj_get_content_height(surface_) < 400));
+    set_hidden(viewer_zoom_controls_, video || details_visible_);
+
+    if (!video) return;
+    const bool stopped = video_playback_.state == GalleryVideoPlaybackState::paused ||
+                         video_playback_.state == GalleryVideoPlaybackState::ended ||
+                         video_playback_.state == GalleryVideoPlaybackState::error ||
+                         video_playback_.state == GalleryVideoPlaybackState::idle;
+    if (video_toggle_icon_) lv_label_set_text(video_toggle_icon_, stopped ? LV_SYMBOL_PLAY : LV_SYMBOL_PAUSE);
+    if (video_fullscreen_icon_)
+        lv_label_set_text(video_fullscreen_icon_, video_fullscreen_ ? "\xef\x81\xa6" : "\xef\x81\xa5");
+    if (video_volume_icon_)
+        lv_label_set_text(video_volume_icon_, video_playback_.volume <= 0.0 ? LV_SYMBOL_MUTE
+                                         : video_playback_.volume < 50.0 ? LV_SYMBOL_VOLUME_MID
+                                                                        : LV_SYMBOL_VOLUME_MAX);
+
+    const auto duration = std::max(0.0, video_playback_.duration);
+    const auto position = std::clamp(video_playback_.position, 0.0, duration);
+    if (video_position_) {
+        const auto text = format_video_time(position);
+        lv_label_set_text(video_position_, text.c_str());
+    }
+    if (video_duration_) {
+        const auto text = format_video_time(duration);
+        lv_label_set_text(video_duration_, text.c_str());
+    }
+    if (video_seek_slider_) {
+        const bool seekable = duration > 0.0 && video_playback_.state != GalleryVideoPlaybackState::loading &&
+                              video_playback_.state != GalleryVideoPlaybackState::error;
+        if (seekable)
+            lv_obj_remove_state(video_seek_slider_, LV_STATE_DISABLED);
+        else
+            lv_obj_add_state(video_seek_slider_, LV_STATE_DISABLED);
+        if (!lv_obj_has_state(video_seek_slider_, LV_STATE_PRESSED)) {
+            const auto value = duration > 0.0
+                                   ? static_cast<int>(std::lround(position / duration * kVideoSeekSliderMaximum))
+                                   : 0;
+            lv_slider_set_value(video_seek_slider_, value, LV_ANIM_OFF);
+        }
+    }
+    if (video_volume_slider_ && !lv_obj_has_state(video_volume_slider_, LV_STATE_PRESSED)) {
+        lv_slider_set_value(video_volume_slider_, static_cast<int>(std::lround(video_playback_.volume)), LV_ANIM_OFF);
+    }
+
+    const bool compact = lv_obj_get_content_width(viewer_) < 440;
+    set_hidden(video_previous_button_, compact);
+    set_hidden(video_next_button_, compact);
+    set_hidden(video_details_button_, compact || video_fullscreen_);
+    set_hidden(video_delete_button_, compact || video_fullscreen_);
+}
+
+void GalleryView::playback_tick()
+{
+    if (view_model_.mode() != GalleryViewModel::Mode::viewer || !view_model_.selected_item() ||
+        view_model_.selected_item()->kind != GalleryMediaKind::video || !video_player_)
+        return;
+    video_playback_ = video_player_->poll();
+    if (video_playback_.state == GalleryVideoPlaybackState::error) {
+        const auto message = video_playback_.error.empty() ? "Unable to play video" : video_playback_.error;
+        lv_label_set_text(viewer_status_, message.c_str());
+        set_hidden(viewer_status_, false);
+    } else if (video_playback_.state == GalleryVideoPlaybackState::ended) {
+        lv_label_set_text(viewer_status_, "Video ended");
+        set_hidden(viewer_status_, false);
+    } else if (video_playback_.state == GalleryVideoPlaybackState::loading) {
+        lv_label_set_text(viewer_status_, "Loading video...");
+        set_hidden(viewer_status_, false);
+    }
+    update_video_controls();
+    render_video_frame();
+}
+
 void GalleryView::set_details_visible(bool visible)
 {
     details_visible_ = visible;
+    if (visible) video_fullscreen_ = false;
     set_hidden(viewer_details_, !visible);
     set_hidden(viewer_controls_, visible);
     set_hidden(viewer_zoom_controls_, visible);
     set_hidden(filmstrip_, visible || lv_obj_get_content_height(surface_) < 400);
+    update_video_controls();
     if (visible) lv_obj_scroll_to_y(viewer_details_body_, 0, LV_ANIM_OFF);
 }
 
@@ -865,7 +1309,10 @@ void GalleryView::update_header() noexcept
 {
     if (!header_count_) return;
     const auto count = view_model_.items().size();
-    lv_label_set_text_fmt(header_count_, "%u %s", static_cast<unsigned>(count), count == 1 ? "photo" : "photos");
+    const bool has_video = std::any_of(view_model_.items().begin(), view_model_.items().end(),
+                                       [](const GalleryItem &item) { return item.kind == GalleryMediaKind::video; });
+    const char *noun = has_video ? (count == 1 ? "item" : "items") : (count == 1 ? "photo" : "photos");
+    lv_label_set_text_fmt(header_count_, "%u %s", static_cast<unsigned>(count), noun);
     lv_label_set_text(header_title_, showing_albums_ ? "Albums"
                                      : view_model_.collection() == Collection::all
                                          ? "Library"
@@ -918,7 +1365,7 @@ void GalleryView::apply_layout()
         lv_obj_set_height(header_, compact ? 104 : 124);
         lv_obj_set_height(tab_bar_, compact ? 72 : 82);
         // On short displays reclaim the filmstrip's space for the photo.
-        set_hidden(filmstrip_, details_visible_ || height < 400);
+        set_hidden(filmstrip_, details_visible_ || video_fullscreen_ || height < 400);
         lv_obj_set_height(viewer_top_bar_, height < 400 ? 64 : kViewerHeaderHeight);
         auto *sheet = lv_obj_find_by_name(delete_confirmation_, "gallery_delete_dialog");
         lv_obj_set_width(sheet, std::min<std::int32_t>(400, std::max<std::int32_t>(1, width - 24)));
@@ -975,6 +1422,7 @@ void GalleryView::layout_completed_event(lv_event_t *event)
 void GalleryView::reload_event(lv_event_t *event)
 {
     auto *view = static_cast<GalleryView *>(lv_event_get_user_data(event));
+    view->video_thumbnail_failures_.clear();
     view->view_model_.reload();
     if (view->showing_albums_) {
         view->update_header();
@@ -1038,6 +1486,72 @@ void GalleryView::close_details_event(lv_event_t *event)
     view->render_viewer();
 }
 
+void GalleryView::video_toggle_event(lv_event_t *event)
+{
+    auto *view = static_cast<GalleryView *>(lv_event_get_user_data(event));
+    if (!view || !view->video_player_ || !view->view_model_.selected_item() ||
+        view->view_model_.selected_item()->kind != GalleryMediaKind::video)
+        return;
+    if (view->video_playback_.state == GalleryVideoPlaybackState::ended ||
+        view->video_playback_.state == GalleryVideoPlaybackState::error ||
+        view->video_playback_.state == GalleryVideoPlaybackState::idle) {
+        view->video_player_->load(view->view_model_.selected_item()->photo_path);
+        view->video_playback_ = {};
+        view->video_playback_.state = GalleryVideoPlaybackState::loading;
+    } else {
+        view->video_player_->toggle_pause();
+    }
+    view->update_video_controls();
+}
+
+void GalleryView::video_seek_event(lv_event_t *event)
+{
+    auto *view = static_cast<GalleryView *>(lv_event_get_user_data(event));
+    if (!view || !view->video_player_ || !view->video_seek_slider_ || view->video_playback_.duration <= 0.0)
+        return;
+    const auto value = lv_slider_get_value(view->video_seek_slider_);
+    const auto position = view->video_playback_.duration *
+                          static_cast<double>(value) / static_cast<double>(kVideoSeekSliderMaximum);
+    view->video_player_->seek(position);
+    view->video_playback_.position = position;
+    view->update_video_controls();
+}
+
+void GalleryView::video_volume_event(lv_event_t *event)
+{
+    auto *view = static_cast<GalleryView *>(lv_event_get_user_data(event));
+    auto *slider = lv_event_get_target_obj(event);
+    if (!view || !view->video_player_ || !slider || !lv_obj_has_state(slider, LV_STATE_PRESSED)) return;
+    const auto volume = static_cast<double>(lv_slider_get_value(slider));
+    view->video_player_->set_volume(volume);
+    view->video_playback_.volume = volume;
+    view->update_video_controls();
+}
+
+void GalleryView::video_fullscreen_event(lv_event_t *event)
+{
+    auto *view = static_cast<GalleryView *>(lv_event_get_user_data(event));
+    if (!view || !view->view_model_.selected_item() ||
+        view->view_model_.selected_item()->kind != GalleryMediaKind::video)
+        return;
+    view->video_fullscreen_ = !view->video_fullscreen_;
+    view->update_video_controls();
+    lv_obj_update_layout(view->viewer_);
+    view->render_video_frame();
+}
+
+void GalleryView::playback_timer_event(lv_timer_t *timer)
+{
+    auto *view = static_cast<GalleryView *>(lv_timer_get_user_data(timer));
+    if (view) view->playback_tick();
+}
+
+void GalleryView::deferred_thumbnail_timer_event(lv_timer_t *timer)
+{
+    auto *view = static_cast<GalleryView *>(lv_timer_get_user_data(timer));
+    if (view) view->render_deferred_thumbnail_batch();
+}
+
 void GalleryView::previous_event(lv_event_t *event)
 {
     auto *view = static_cast<GalleryView *>(lv_event_get_user_data(event));
@@ -1068,6 +1582,7 @@ void GalleryView::details_event(lv_event_t *event)
     if (!view || view->view_model_.mode() != GalleryViewModel::Mode::viewer || !view->view_model_.selected_item()) {
         return;
     }
+    view->video_fullscreen_ = false;
     view->set_details_visible(true);
     view->render_viewer();
 }

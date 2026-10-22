@@ -2,13 +2,16 @@
 #define LILYGO_UI_GALLERY_PAGES_GALLERY_GALLERY_VIEW_HPP
 
 #include "pages/gallery/gallery_view_model.hpp"
+#include "services/video_player.hpp"
 
 #include <lvgl.h>
 
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 class GalleryView {
@@ -24,7 +27,11 @@ private:
         std::size_t index  = 0;
         lv_obj_t *tile     = nullptr;
         lv_obj_t *canvas   = nullptr;
+        lv_obj_t *play_icon = nullptr;
         std::vector<std::uint8_t> pixels;
+        std::int32_t width  = 0;
+        std::int32_t height = 0;
+        bool rendered = false;
     };
     struct AlbumWidget {
         GalleryView *owner                      = nullptr;
@@ -51,6 +58,12 @@ private:
     static void cancel_delete_event(lv_event_t *event);
     static void confirm_delete_event(lv_event_t *event);
     static void close_details_event(lv_event_t *event);
+    static void video_toggle_event(lv_event_t *event);
+    static void video_seek_event(lv_event_t *event);
+    static void video_volume_event(lv_event_t *event);
+    static void video_fullscreen_event(lv_event_t *event);
+    static void playback_timer_event(lv_timer_t *timer);
+    static void deferred_thumbnail_timer_event(lv_timer_t *timer);
     static void swipe_event(lv_event_t *event);
 
     void create_header_actions();
@@ -61,14 +74,24 @@ private:
     void rebuild_albums();
     void rebuild_filmstrip();
     void resize_grid();
+    void render_grid_thumbnail(ThumbnailWidget &thumbnail, std::int32_t width, std::int32_t height);
+    void cancel_deferred_thumbnail_render() noexcept;
+    void schedule_deferred_thumbnail_render();
+    void render_deferred_thumbnail_batch();
     void resize_albums();
     void show_grid();
     void show_albums();
     void show_viewer();
     void render_viewer();
+    bool render_item_thumbnail(const GalleryItem &item, std::int32_t width, std::int32_t height,
+                               std::vector<std::uint8_t> &pixels);
     void set_viewer_zoom(float zoom);
     void position_viewer_canvas();
     void set_details_visible(bool visible);
+    void stop_video() noexcept;
+    void render_video_frame();
+    void update_video_controls() noexcept;
+    void playback_tick();
     void update_header() noexcept;
     void update_navigation() noexcept;
     void apply_layout();
@@ -91,6 +114,21 @@ private:
     lv_obj_t *viewer_date_         = nullptr;
     lv_obj_t *viewer_filename_     = nullptr;
     lv_obj_t *viewer_status_        = nullptr;
+    lv_obj_t *video_toggle_button_  = nullptr;
+    lv_obj_t *video_toggle_icon_    = nullptr;
+    lv_obj_t *video_timeline_       = nullptr;
+    lv_obj_t *video_position_       = nullptr;
+    lv_obj_t *video_seek_slider_    = nullptr;
+    lv_obj_t *video_duration_       = nullptr;
+    lv_obj_t *viewer_actions_       = nullptr;
+    lv_obj_t *video_previous_button_ = nullptr;
+    lv_obj_t *video_next_button_     = nullptr;
+    lv_obj_t *video_details_button_ = nullptr;
+    lv_obj_t *video_delete_button_  = nullptr;
+    lv_obj_t *video_volume_icon_    = nullptr;
+    lv_obj_t *video_volume_slider_  = nullptr;
+    lv_obj_t *video_fullscreen_button_ = nullptr;
+    lv_obj_t *video_fullscreen_icon_ = nullptr;
     lv_obj_t *viewer_zoom_controls_ = nullptr;
     lv_obj_t *viewer_zoom_label_    = nullptr;
     lv_obj_t *viewer_controls_      = nullptr;
@@ -104,10 +142,19 @@ private:
     lv_obj_t *delete_button_        = nullptr;
     lv_obj_t *delete_confirmation_  = nullptr;
     lv_obj_t *delete_error_         = nullptr;
+    lv_timer_t *playback_timer_     = nullptr;
+    lv_timer_t *thumbnail_timer_    = nullptr;
+    std::size_t deferred_thumbnail_index_ = 0;
     std::vector<ThumbnailWidget> thumbnails_;
     std::vector<ThumbnailWidget> filmstrip_thumbnails_;
     std::array<AlbumWidget, 4> album_widgets_{};
     std::vector<std::uint8_t> viewer_pixels_;
+    std::vector<std::uint8_t> video_bgr_frame_;
+    std::vector<std::uint8_t> video_frame_;
+    std::unique_ptr<GalleryVideoPlayer> video_player_;
+    std::unique_ptr<GalleryVideoPlayer> thumbnail_player_;
+    std::unordered_set<std::string> video_thumbnail_failures_;
+    GalleryVideoPlayback video_playback_{};
     std::string viewer_item_path_;
     lv_point_t press_point_{};
     std::int32_t pan_start_x_    = 0;
@@ -126,6 +173,7 @@ private:
     bool swipe_pressed_           = false;
     bool pan_active_              = false;
     bool details_visible_         = false;
+    bool video_fullscreen_        = false;
 };
 
 #endif

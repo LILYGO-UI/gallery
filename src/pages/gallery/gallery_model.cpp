@@ -35,6 +35,29 @@ bool is_supported_image(const std::string &name)
     return extension == ".jpg" || extension == ".jpeg" || extension == ".png" || extension == ".ppm";
 }
 
+bool is_supported_video(const std::string &name)
+{
+    // Camera writes H.264 in an MP4 container. Keep the scanner limited to
+    // formats the device camera actually produces until another decoder is
+    // added; accepting an arbitrary container would make an item appear in
+    // the library without a player that can open it.
+    return lowercase_extension(name) == ".mp4";
+}
+
+bool is_incomplete_video(const std::string &name)
+{
+    constexpr char suffix[] = ".part.mp4";
+    constexpr std::size_t suffix_length = sizeof(suffix) - 1;
+    if (name.size() < suffix_length) return false;
+    const auto start = name.size() - suffix_length;
+    for (std::size_t offset = 0; offset < suffix_length; ++offset) {
+        if (std::tolower(static_cast<unsigned char>(name[start + offset])) !=
+            static_cast<unsigned char>(suffix[offset]))
+            return false;
+    }
+    return true;
+}
+
 std::string camera_thumbnail_path(const std::string &directory, const std::string &name)
 {
     const auto dot = name.find_last_of('.');
@@ -46,6 +69,8 @@ std::string camera_thumbnail_path(const std::string &directory, const std::strin
 
 std::string gallery_default_photo_directory()
 {
+    const char *camera_output = std::getenv("CAMERA_OUTPUT_DIR");
+    if (camera_output && *camera_output) return camera_output;
     const char *home = std::getenv("HOME");
     if (!home || !*home) return {};
     return std::string(home) + "/Camera";
@@ -63,6 +88,14 @@ std::string gallery_default_pictures_directory()
     const char *home = std::getenv("HOME");
     if (!home || !*home) return {};
     return std::string(home) + "/Pictures";
+}
+
+std::string gallery_media_thumbnail_path(const std::string &media_path)
+{
+    const auto slash = media_path.find_last_of('/');
+    const auto dot   = media_path.find_last_of('.');
+    if (dot == std::string::npos || (slash != std::string::npos && dot < slash)) return {};
+    return media_path.substr(0, dot) + ".thumb.rgb565";
 }
 
 GalleryModel::GalleryModel(std::string photo_directory, std::string screenshot_directory, std::string sample_directory,
@@ -152,7 +185,9 @@ bool GalleryModel::remove_selected() noexcept
     if (!item || item->read_only) return false;
 
     const auto photo_path     = item->photo_path;
-    const auto thumbnail_path = item->thumbnail_path;
+    auto thumbnail_path = item->thumbnail_path;
+    if (item->kind == GalleryMediaKind::video && thumbnail_path == photo_path)
+        thumbnail_path = gallery_media_thumbnail_path(photo_path);
     if (std::remove(photo_path.c_str()) != 0 && errno != ENOENT) return false;
     if (thumbnail_path != photo_path) std::remove(thumbnail_path.c_str());
 
@@ -167,20 +202,27 @@ void GalleryModel::scan_directory(const std::string &directory, GallerySource so
 
     while (const auto *entry = ::readdir(folder)) {
         const std::string name = entry->d_name;
-        if (name == "." || name == ".." || !is_supported_image(name)) continue;
+        if (name == "." || name == ".." || is_incomplete_video(name)) continue;
+        const bool image = is_supported_image(name);
+        const bool video = !image && is_supported_video(name);
+        if (!image && !video) continue;
+        const auto media_kind = video ? GalleryMediaKind::video : GalleryMediaKind::photo;
 
         const auto photo_path = directory + '/' + name;
         struct stat information{};
         if (!is_regular_file(photo_path, &information)) continue;
 
         auto thumbnail_path = photo_path;
-        if (source != GallerySource::screenshots) {
+        if (media_kind == GalleryMediaKind::photo && source != GallerySource::screenshots) {
+            const auto stored_thumbnail = camera_thumbnail_path(directory, name);
+            if (is_regular_file(stored_thumbnail)) thumbnail_path = stored_thumbnail;
+        } else if (media_kind == GalleryMediaKind::video) {
             const auto stored_thumbnail = camera_thumbnail_path(directory, name);
             if (is_regular_file(stored_thumbnail)) thumbnail_path = stored_thumbnail;
         }
         const auto size_bytes = information.st_size >= 0 ? static_cast<std::uint64_t>(information.st_size) : 0;
         items_.push_back({photo_path, thumbnail_path, name, static_cast<std::int64_t>(information.st_mtime), read_only,
-                          source, size_bytes});
+                          source, size_bytes, media_kind});
     }
     ::closedir(folder);
 }

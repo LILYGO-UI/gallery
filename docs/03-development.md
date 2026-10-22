@@ -28,7 +28,11 @@ Use CMake 3.21 or later (including CTest and CPack), Python 3.11 or later for
 LPM, and a C/C++ compiler with C++17 support. The presets use Unix Makefiles.
 AppKit requires `pkg-config`, `patch`, SDL2 for the host display, and FreeType
 for font rendering. libjpeg-turbo development headers and libraries are required
-for Gallery's JPEG decoder. See [image formats](02-images-and-storage.md#image-formats-and-thumbnails)
+for Gallery's JPEG decoder, and libmpv is required at runtime for MP4 playback
+and first-frame thumbnail generation.
+Host video integration tests are enabled when FFmpeg with `libx264` and AAC
+encoders is also available; otherwise CMake skips those tests.
+See [image formats](02-images-and-storage.md#image-formats-and-thumbnails)
 for the supported JPEG formats.
 
 ### Debian 12 / Ubuntu 24.04 or Later
@@ -36,7 +40,7 @@ for the supported JPEG formats.
 ```sh
 sudo apt update
 sudo apt install build-essential cmake git pkg-config patch libsdl2-dev \
-  libfreetype6-dev python3 python3-venv python3-pip
+  libfreetype6-dev libmpv2 python3 python3-venv python3-pip
 ```
 
 For libjpeg-turbo support:
@@ -55,7 +59,7 @@ on `PATH`:
 
 ```sh
 xcode-select --install
-brew install git cmake pkg-config patch sdl2 freetype python
+brew install git cmake pkg-config patch sdl2 freetype mpv python
 ```
 
 For libjpeg-turbo support:
@@ -116,7 +120,8 @@ lpm test
 
 | Test | Coverage |
 | --- | --- |
-| `gallery-core` | Directory scanning, newest-first ordering, selection, deletion, read-only samples, and host fallback |
+| `gallery-video-player` | When libmpv and FFmpeg with libx264/AAC are available, play a generated H.264/AAC clip, select its audio track, adjust volume, seek while paused and after EOF, and resize portrait frames |
+| `gallery-core` | Directory scanning, MP4 and sidecar discovery, newest-first ordering, selection, deletion, read-only samples, and host fallback |
 | `gallery-view-model` | Collection filtering, user commands, grid/viewer state, and reactive Subject updates |
 | `gallery-image` | PNG/JPEG decoding, matching PNG/PPM pixels, cover/contain scaling, and error backgrounds |
 | `gallery-render-portrait` | Rendering and complete UI flows at `568 x 1232` |
@@ -124,9 +129,11 @@ lpm test
 
 The render tests cover album filtering, filmstrip navigation, vertical swipes,
 closing and reopening details, deletion confirmation, read-only samples, and
-returning to the same grid scroll position. They also verify focus and scrolling
-with 24 photos, resizing to compact displays, and keeping the selected filmstrip
-thumbnail visible as the display narrows.
+returning to the same grid scroll position. When the video integration fixture
+is available, they also exercise video seeking, volume, and full-screen layout in
+both orientations. The tests verify focus and scrolling with 24 photos, resizing
+to compact displays, and keeping the selected filmstrip thumbnail visible as the
+display narrows.
 
 Snapshots are written under `build/host-simulator/` with
 `gallery-portrait.ppm` or `gallery-landscape.ppm` as the base filename:
@@ -229,7 +236,7 @@ import source, and shared-font license notices. During installation the Debian
 maintainer script copies supported sample images into the target user's
 `$HOME/Pictures` without overwriting existing files. The target system must provide `libc6`,
 `libstdc++6`, `libdrm2`, `libfreetype6`, and `lilygo-ui-appkit-dev >= 0.1.0`.
-The package requires `libjpeg62-turbo` at runtime. AppKit supplies
+The package requires `libjpeg62-turbo` and `libmpv2` at runtime. AppKit supplies
 the shared runtime fonts on the device. Package identity and version are
 maintained in [`lpm.toml`](../lpm.toml).
 
@@ -263,6 +270,8 @@ cpack --config build/cm0-cross/CPackConfig.cmake -B dist
 | SDL2 or FreeType is missing | Install host development packages; for cross builds, check target FreeType and DRM in the sysroot. |
 | Homebrew libraries are not found | Configure with `cmake --preset host-simulator -DCMAKE_PREFIX_PATH="$(brew --prefix)"`. |
 | BSP download fails | Check access to GitHub releases and available disk space, then rerun configuration. |
-| Photos do not appear, or only samples appear | Check source directory overrides, permissions, supported formats, and the 24-item limit; press refresh. See [images and storage](02-images-and-storage.md). |
+| Photos or videos do not appear, or only samples appear | Check source directory overrides, permissions, supported formats, and the 24-item limit; press refresh. See [images and storage](02-images-and-storage.md). |
 | A JPEG cannot be opened | Check for corrupt or oversized data. Gallery uses LVGL's libjpeg-turbo decoder and accepts baseline and progressive JPEGs; rebuild if the target development package is missing. |
+| An MP4 cannot be played | Check that `libmpv2` is installed and that the file is a finalized H.264 MP4; recordings ending in `.part.mp4` are intentionally hidden. |
+| A video has no sound | Check for an audio track, the Gallery playback volume, and the system output volume/device. Camera recordings currently saved without audio remain silent. |
 | A sample cannot be deleted | Samples, including files selected by a sample-directory override, are intentionally read-only. |

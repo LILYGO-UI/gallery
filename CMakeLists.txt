@@ -182,13 +182,16 @@ configure_file(
     @ONLY)
 
 add_library(lilygo_ui_gallery_core STATIC
-    src/pages/gallery/gallery_model.cpp)
+    src/pages/gallery/gallery_model.cpp
+    src/services/video_player.cpp)
 target_include_directories(lilygo_ui_gallery_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src
-    ${CMAKE_CURRENT_BINARY_DIR}/generated)
+    ${CMAKE_CURRENT_BINARY_DIR}/generated
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party/mpv/include)
 target_compile_options(lilygo_ui_gallery_core PRIVATE
     -Wall -Wextra -Wpedantic)
 target_compile_features(lilygo_ui_gallery_core PUBLIC cxx_std_17)
+target_link_libraries(lilygo_ui_gallery_core PUBLIC ${CMAKE_DL_LIBS})
 
 add_library(lilygo_ui_gallery_ui STATIC
     src/app.cpp
@@ -244,6 +247,12 @@ install(FILES ${CMAKE_CURRENT_BINARY_DIR}/${LILYGO_UI_APP_ID}.desktop
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/${LILYGO_UI_APP_ID}.metainfo.xml
     DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/metainfo
     COMPONENT app)
+install(FILES
+    third_party/mpv/include/mpv/client.h
+    third_party/mpv/include/mpv/render.h
+    third_party/mpv/README.md
+    DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/doc/${LILYGO_UI_PACKAGE_NAME}/licenses/mpv
+    COMPONENT app)
 install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/assets/gallery/
     DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/${LILYGO_UI_PACKAGE_NAME}/gallery
     COMPONENT app
@@ -258,6 +267,45 @@ lilygo_ui_install_font_licenses(
     app)
 
 if(BUILD_TESTING AND NOT CMAKE_CROSSCOMPILING)
+    find_program(GALLERY_FFMPEG_EXECUTABLE ffmpeg)
+    find_library(GALLERY_MPV_RUNTIME NAMES mpv mpv.2
+        PATHS /opt/homebrew/lib /usr/local/lib /usr/lib)
+    if(GALLERY_FFMPEG_EXECUTABLE AND GALLERY_MPV_RUNTIME)
+        execute_process(
+            COMMAND "${GALLERY_FFMPEG_EXECUTABLE}" -hide_banner -encoders
+            OUTPUT_VARIABLE _gallery_ffmpeg_encoders
+            ERROR_VARIABLE _gallery_ffmpeg_encoders_error
+            RESULT_VARIABLE _gallery_ffmpeg_encoders_result)
+        string(APPEND _gallery_ffmpeg_encoders "${_gallery_ffmpeg_encoders_error}")
+    endif()
+    if(GALLERY_FFMPEG_EXECUTABLE AND GALLERY_MPV_RUNTIME AND
+       _gallery_ffmpeg_encoders_result EQUAL 0 AND
+       _gallery_ffmpeg_encoders MATCHES "libx264" AND
+       _gallery_ffmpeg_encoders MATCHES "aac")
+        set(_gallery_video_test_fixture "${CMAKE_CURRENT_BINARY_DIR}/gallery-video-test.mp4")
+        add_custom_command(
+            OUTPUT "${_gallery_video_test_fixture}"
+            COMMAND "${GALLERY_FFMPEG_EXECUTABLE}" -hide_banner -loglevel error -y
+                -f lavfi -i testsrc=size=160x90:rate=15
+                -f lavfi -i sine=frequency=440:sample_rate=44100
+                -t 3 -c:v libx264 -pix_fmt yuv420p -c:a aac -movflags +faststart
+                "${_gallery_video_test_fixture}"
+            VERBATIM)
+        add_custom_target(gallery-video-test-fixture
+            DEPENDS "${_gallery_video_test_fixture}")
+        add_executable(gallery-video-player-tests tests/test_video_player.cpp)
+        target_compile_options(gallery-video-player-tests PRIVATE
+            -Wall -Wextra -Wpedantic -UNDEBUG)
+        target_link_libraries(gallery-video-player-tests PRIVATE
+            lilygo_ui_gallery_core)
+        add_dependencies(gallery-video-player-tests gallery-video-test-fixture)
+        add_test(NAME gallery-video-player COMMAND gallery-video-player-tests
+            "${_gallery_video_test_fixture}")
+    else()
+        message(STATUS
+            "Gallery: skipping libmpv integration test (requires libmpv and FFmpeg libx264/AAC encoders)")
+    endif()
+
     add_executable(gallery-core-tests tests/test_core.cpp)
     target_compile_options(gallery-core-tests PRIVATE
         -Wall -Wextra -Wpedantic -UNDEBUG)
@@ -289,6 +337,9 @@ if(BUILD_TESTING AND NOT CMAKE_CROSSCOMPILING)
         -Wall -Wextra -Wpedantic -UNDEBUG)
     target_link_libraries(gallery-render-ui PRIVATE
         lilygo_ui_gallery_ui)
+    if(TARGET gallery-video-test-fixture)
+        add_dependencies(gallery-render-ui gallery-video-test-fixture)
+    endif()
     foreach(viewport IN ITEMS portrait landscape)
         if(viewport STREQUAL "portrait")
             set(_width 568)
@@ -297,10 +348,15 @@ if(BUILD_TESTING AND NOT CMAKE_CROSSCOMPILING)
             set(_width 1232)
             set(_height 568)
         endif()
-        add_test(NAME gallery-render-${viewport} COMMAND gallery-render-ui
+        set(_gallery_render_args
             ${_width} ${_height}
             ${CMAKE_CURRENT_BINARY_DIR}/gallery-${viewport}.ppm
             ${CMAKE_CURRENT_SOURCE_DIR}/assets/gallery/forest.jpg)
+        if(TARGET gallery-video-test-fixture)
+            list(APPEND _gallery_render_args "${_gallery_video_test_fixture}")
+        endif()
+        add_test(NAME gallery-render-${viewport} COMMAND gallery-render-ui
+            ${_gallery_render_args})
     endforeach()
 endif()
 
@@ -329,7 +385,7 @@ set(CPACK_COMPONENTS_ALL app)
 set(CPACK_DEBIAN_APP_PACKAGE_NAME "${LILYGO_UI_PACKAGE_NAME}")
 set(CPACK_DEBIAN_APP_FILE_NAME DEB-DEFAULT)
 set(CPACK_DEBIAN_APP_PACKAGE_DEPENDS
-    "libc6, libstdc++6, libdrm2, libfreetype6, lilygo-ui-appkit-dev (>= ${LILYGO_UI_MIN_APPKIT_VERSION})")
+    "libc6, libstdc++6, libdrm2, libfreetype6, libmpv2 (>= 0.38), lilygo-ui-appkit-dev (>= ${LILYGO_UI_MIN_APPKIT_VERSION})")
 string(APPEND CPACK_DEBIAN_APP_PACKAGE_DEPENDS ", libjpeg62-turbo")
 set(CPACK_DEBIAN_APP_PACKAGE_SECTION "utils")
 set(CPACK_DEBIAN_APP_PACKAGE_CONTROL_EXTRA

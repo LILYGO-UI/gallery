@@ -102,6 +102,43 @@ void test_model()
     assert(::rmdir(root.c_str()) == 0);
 }
 
+void test_video_discovery()
+{
+    char root_template[] = "/tmp/lilygo-gallery-video-XXXXXX";
+    const auto *created  = ::mkdtemp(root_template);
+    assert(created);
+    const std::string root  = created;
+    const auto camera        = make_directory(root, "Camera");
+    const auto video         = camera + "/VID_123.mp4";
+    const auto unfinished    = camera + "/VID_124.part.mp4";
+    const auto unrelated     = camera + "/clip.webm";
+    const auto thumbnail     = camera + "/VID_123.thumb.rgb565";
+    assert(gallery_media_thumbnail_path(video) == thumbnail);
+    write_file(video, "mp4", 200);
+    write_file(thumbnail, std::string(360U * 640U * 2U, '\0'), 200);
+    write_file(unfinished, "partial", 300);
+    write_file(unrelated, "webm", 400);
+
+    GalleryModel model(camera, {}, {});
+    model.reload();
+    assert(model.items().size() == 1);
+    assert(model.items()[0].photo_path == video);
+    assert(model.items()[0].thumbnail_path == thumbnail);
+    assert(model.items()[0].filename == "VID_123.mp4");
+    assert(model.items()[0].kind == GalleryMediaKind::video);
+    assert(model.items()[0].source == GallerySource::camera);
+
+    assert(model.remove_selected());
+    assert(::access(video.c_str(), F_OK) != 0);
+    assert(::access(thumbnail.c_str(), F_OK) != 0);
+    assert(::access(unfinished.c_str(), F_OK) == 0);
+
+    assert(std::remove(unfinished.c_str()) == 0);
+    assert(std::remove(unrelated.c_str()) == 0);
+    assert(::rmdir(camera.c_str()) == 0);
+    assert(::rmdir(root.c_str()) == 0);
+}
+
 void test_development_samples_fallback()
 {
     char root_template[] = "/tmp/lilygo-gallery-fallback-XXXXXX";
@@ -166,6 +203,10 @@ void test_default_camera_directory_uses_home()
     const char *previous_home = std::getenv("HOME");
     const bool had_home       = previous_home && *previous_home;
     const std::string old_home = had_home ? previous_home : std::string();
+    const char *previous_camera_output = std::getenv("CAMERA_OUTPUT_DIR");
+    const bool had_camera_output       = previous_camera_output && *previous_camera_output;
+    const std::string old_camera_output = had_camera_output ? previous_camera_output : std::string();
+    assert(::unsetenv("CAMERA_OUTPUT_DIR") == 0);
     assert(::setenv("HOME", root.c_str(), 1) == 0);
 
     assert(gallery_default_photo_directory() == camera);
@@ -179,6 +220,9 @@ void test_default_camera_directory_uses_home()
         assert(::setenv("HOME", old_home.c_str(), 1) == 0);
     } else {
         assert(::unsetenv("HOME") == 0);
+    }
+    if (had_camera_output) {
+        assert(::setenv("CAMERA_OUTPUT_DIR", old_camera_output.c_str(), 1) == 0);
     }
     assert(std::remove(photo.c_str()) == 0);
     assert(::rmdir(camera.c_str()) == 0);
@@ -265,6 +309,7 @@ void test_pictures_directory_is_writable_gallery_source()
 int main()
 {
     test_model();
+    test_video_discovery();
     test_development_samples_fallback();
     test_default_camera_directory_uses_home();
     test_default_screenshot_directory_uses_home();

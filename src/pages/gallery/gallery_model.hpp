@@ -8,6 +8,11 @@
 
 enum class GallerySource { camera, pictures, screenshots, samples };
 
+// Gallery media is intentionally kept separate from its source collection so
+// viewers can choose an image renderer or a video player without guessing from
+// the filename. Camera records H.264 video in MP4 containers.
+enum class GalleryMediaKind { photo, video };
+
 // Returns the camera directory used when no explicit gallery directory is
 // configured. The camera application stores captures in this same location.
 [[nodiscard]] std::string gallery_default_photo_directory();
@@ -20,6 +25,10 @@ enum class GallerySource { camera, pictures, screenshots, samples };
 // samples and photos that are not camera captures.
 [[nodiscard]] std::string gallery_default_pictures_directory();
 
+// Returns the sibling RGB565 thumbnail path used for camera photos and video
+// recordings. The sidecar is not itself a gallery item.
+[[nodiscard]] std::string gallery_media_thumbnail_path(const std::string &media_path);
+
 struct GalleryItem {
     std::string photo_path;
     std::string thumbnail_path;
@@ -28,6 +37,7 @@ struct GalleryItem {
     bool read_only             = false;
     GallerySource source       = GallerySource::camera;
     std::uint64_t size_bytes   = 0;
+    GalleryMediaKind kind      = GalleryMediaKind::photo;
 };
 
 class GalleryModel {

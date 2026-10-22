@@ -6,16 +6,18 @@
 
 | Collection | Default directory | Environment override | Access in Gallery |
 | --- | --- | --- | --- |
-| Camera | `$HOME/Camera` | `LILYGO_GALLERY_PHOTO_DIR` | Browse and delete |
-| Pictures | `$HOME/Pictures` | `LILYGO_GALLERY_PICTURES_DIR` | Browse and delete |
+| Camera | `$HOME/Camera` or `CAMERA_OUTPUT_DIR` | `LILYGO_GALLERY_PHOTO_DIR` | Browse and delete photos and MP4 videos |
+| Pictures | `$HOME/Pictures` | `LILYGO_GALLERY_PICTURES_DIR` | Browse and delete photos and MP4 videos |
 | Screenshots | `$HOME/screenshots` | `LILYGO_GALLERY_SCREENSHOT_DIR` | Browse and delete |
 | Samples | explicit `LILYGO_GALLERY_SAMPLE_DIR` or host fallback | `LILYGO_GALLERY_SAMPLE_DIR` | Read-only |
 
 Directories are scanned when the application opens and when the refresh button
 is pressed. Scanning is nonrecursive; unavailable directories are skipped.
-Supported files from all sources are merged and sorted by modification time,
-newest first, with at most 24 items retained across the whole library. Albums
-filter this retained set, so their counts do not represent every file on disk.
+Supported JPEG, PNG, PPM, and camera H.264 MP4 files from all sources are merged
+and sorted by modification time, newest first, with at most 24 items retained
+across the whole library. In-progress camera recordings ending in `.part.mp4`
+are ignored. Albums filter this retained set, so their counts do not represent
+every file on disk.
 Dates use filesystem modification times, not EXIF capture dates.
 
 For host development, launch with your own directories from the repository root:
@@ -32,6 +34,8 @@ Nonempty environment values replace the corresponding defaults when the app
 opens. The same overrides work on a device if explicitly supplied to its
 process. Unset or empty values use the defaults. Refresh rescans the selected
 directories; restart the app to apply changed environment settings.
+When `LILYGO_GALLERY_PHOTO_DIR` is unset, Gallery follows the camera
+application's `CAMERA_OUTPUT_DIR` before falling back to `$HOME/Camera`.
 
 `LILYGO_GALLERY_SAMPLE_DIR` replaces the packaged sample directory and disables
 the automatic host fallback described below. Files from this override remain
@@ -72,7 +76,8 @@ not disable fallback.
 | JPEG (`.jpg`, `.jpeg`) | Decoded with libjpeg-turbo, including progressive JPEGs |
 | PNG (`.png`) | Decoded with LVGL's bundled LodePNG, including alpha compositing onto the page background |
 | PPM (`.ppm`) | Binary P6 images with an 8-bit channel maximum of 255, decoded by Gallery |
-| RGB565 (`.thumb.rgb565`) | Separate camera thumbnails, not standalone library entries |
+| RGB565 (`.thumb.rgb565`) | `360x640` sidecar thumbnails for photos and videos, not standalone library entries |
+| H.264 MP4 (`.mp4`) | First frame used for a generated thumbnail; played in the full-screen viewer through the runtime libmpv decoder |
 | GIF (`.gif`) | Included in the asset package for other consumers; not scanned or decoded by Gallery |
 
 File extensions are matched without case sensitivity. JPEG decoding is a required
@@ -80,26 +85,30 @@ build dependency and the Debian package declares `libjpeg62-turbo` as a runtime
 dependency. The decoder accepts both baseline and progressive JPEG files and
 keeps the existing input-size and source-pixel limits.
 
-Camera photos can have a sibling thumbnail using the same filename stem, such
-as `photo.jpg` and `photo.thumb.rgb565`. It must contain exactly `360 x 640`
-little-endian RGB565 pixels, or 460,800 bytes, without a header. When present,
-this file supplies thumbnails for the grid, album cover, and filmstrip;
-otherwise those thumbnails are generated from the original image. Screenshot
-thumbnails are always generated from their original image.
+Camera photos and MP4 recordings can have a sibling thumbnail using the same
+filename stem, such as `photo.jpg` and `photo.thumb.rgb565`. It must contain
+exactly `360 x 640` little-endian RGB565 pixels, or 460,800 bytes, without a
+header. When present, this file supplies thumbnails for the grid, album cover,
+and filmstrip; otherwise photo thumbnails are generated from the original image
+and writable video recordings are decoded from their first frame and cached in
+this format. Screenshot thumbnails are always generated from their original
+image. Incomplete `.part` files are never used as thumbnail sources.
 
 The full-screen viewer decodes the original photo and uses contain-fit sizing
-against the page background so the image is not cropped. The grid uses square
-cover-fit thumbnails. Unreadable or unsupported image data produces a
-placeholder; the viewer shows `Unable to open photo` when decoding fails.
+against the page background so the image is not cropped. MP4 videos open in the
+same viewer, start automatically, and can be paused or resumed. The grid uses
+square cover-fit thumbnails; if libmpv cannot decode a video, it falls back to a
+play icon placeholder. Unreadable or unsupported image data produces a
+placeholder; the viewer reports a playback error when libmpv cannot open a video.
 
 ## Browsing and Deletion
 
-Library shows all retained photos. Albums provides All Photos, Camera,
+Library shows all retained photos and videos. Albums provides All Photos, Camera,
 Screenshots, and Samples collections with cover images and counts. Opening a
 collection filters both its grid and subsequent viewer navigation.
 
 Tap a grid image to enter the viewer. Use the filmstrip, previous/next buttons,
-or horizontal swipes to switch photos within the collection. Swipe down to
+or horizontal swipes to switch media within the collection. Swipe down to
 return to the grid. Swipe up to reveal the filename, modification time, file
 size, source, and location; the details button in the viewer controls opens the
 same panel directly. The details body scrolls when needed; closing the panel
@@ -109,10 +118,10 @@ plus and minus controls zoom the photo in 25% steps up to the memory-safe
 maximum for the current viewport. While zoomed, drag the photo to inspect
 other regions; horizontal and vertical viewer swipes are reserved for panning.
 
-Deleting a writable photo opens a bottom action sheet with Delete Photo and
+Deleting a writable photo or video opens a bottom action sheet with Delete Item and
 Cancel actions. Confirmation permanently removes the original file; it does
 not move the file to a trash folder. The app then attempts to remove any separate
-thumbnail associated with that photo and refreshes the library. A photo deletion
+thumbnail associated with that photo and refreshes the library. A media deletion
 failure is shown in the confirmation sheet. Samples have deletion disabled.
 
 For layout and interaction acceptance requirements, see the

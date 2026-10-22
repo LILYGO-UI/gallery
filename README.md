@@ -2,9 +2,9 @@
 
 **English** | [简体中文](README.zh-CN.md)
 
-LILYGO UI Gallery is a standalone photo browser for LILYGO UI, built with C++17,
+LILYGO UI Gallery is a standalone photo and video browser for LILYGO UI, built with C++17,
 [LILYGO UI AppKit](https://github.com/LILYGO-UI/cm0-appkit) and LVGL 9.5.
-It browses camera photos, screenshots, and bundled samples with an
+It browses camera photos, MP4 recordings, screenshots, and bundled samples with an
 iOS Photos-inspired interface, keeping filesystem state, presentation state,
 and widgets in separate Model, ViewModel, and View layers.
 
@@ -22,27 +22,36 @@ More portrait and landscape screens are in [`assets/previews`](assets/previews).
 
 ## Features
 
-- **Local library:** scan camera photos, `$HOME/Pictures`, and screenshots on
-  startup or refresh. Show the 24 most recently modified JPEG, PNG, or PPM
-  images, using camera thumbnails when available. Debian installs import the
-  bundled examples into `$HOME/Pictures` so they can be deleted like other
-  user photos.
+- **Local library:** scan camera photos and H.264 MP4 recordings, `$HOME/Pictures`,
+  and screenshots on startup or refresh. Show the 24 most recently modified
+  media items, using camera thumbnails when available. Gallery decodes the
+  first frame of a video when its `.thumb.rgb565` sidecar is missing and caches
+  that thumbnail next to the recording. Incomplete camera files ending in
+  `.part.mp4` stay hidden until recording finalizes. Debian installs import the
+  bundled examples into `$HOME/Pictures` so they can be deleted like other user
+  media.
 - **Albums:** switch between Library and Albums with bottom tabs. Browse
   All Photos, Camera, Screenshots, and Samples with cover images and counts;
   viewer navigation stays within the chosen collection.
 - **Responsive interface:** a white page, large titles, photo counts, and blue
   navigation accents. The edge-to-edge square thumbnail grid has 2-pixel gaps
   and reflows to 3, 4, or 6 columns for portrait and landscape displays.
-- **Full-screen viewing:** display the complete photo without cropping, with
-  its modification date and filename. Navigate with the thumbnail filmstrip,
-  previous/next controls, or horizontal swipes; use the plus/minus controls to
-  zoom in 25% steps and drag a zoomed photo to inspect other regions; swipe down
-  to return to the grid.
+- **Full-screen viewing:** display photos without cropping and play camera MP4
+  recordings inside the viewer. Videos start with audio when an audio track is
+  present, support pause/resume, a draggable timeline, and 0–100% playback
+  volume. Fullscreen hides Gallery's metadata header, filmstrip, and details/delete
+  actions while keeping previous/next, playback, volume, and exit controls.
+  AppKit's status bar and home indicator remain visible. Playback stops when
+  leaving the viewer. Navigate with the thumbnail
+  filmstrip, previous/next controls, or horizontal swipes; use the plus/minus
+  controls to zoom photos in 25% steps and drag a zoomed photo to inspect other
+  regions; swipe down to return to the grid.
 - **Photo details:** swipe up or use the details button to view the filename,
   modification time, size, source, and location in a scrollable panel. Closing
   it restores viewer controls.
 - **Deletion confirmation:** confirm permanent deletion in a bottom action
-  sheet, including removal of a separate camera thumbnail. Samples are read-only.
+  sheet, including removal of a generated video or camera thumbnail. Samples
+  are read-only.
 
 An empty host gallery automatically loads read-only samples from
 `assets/gallery/`. See [images and storage](docs/02-images-and-storage.md) for
