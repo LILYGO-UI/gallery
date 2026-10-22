@@ -28,6 +28,10 @@ constexpr int kBufferingProperty    = 4;
 constexpr int kVolumeProperty       = 5;
 constexpr int kEofProperty          = 6;
 constexpr int kAudioTrackProperty   = 7;
+constexpr int kVideoWidthProperty   = 8;
+constexpr int kVideoHeightProperty  = 9;
+constexpr int kContainerProperty    = 10;
+constexpr int kVideoCodecProperty   = 11;
 
 std::string number_argument(double value)
 {
@@ -102,6 +106,8 @@ struct GalleryVideoPlayer::Impl {
     MPV_FUNCTION(mpv_set_property_async);
     MPV_FUNCTION(mpv_command_async);
     MPV_FUNCTION(mpv_observe_property);
+    MPV_FUNCTION(mpv_get_property_string);
+    MPV_FUNCTION(mpv_free);
     MPV_FUNCTION(mpv_wait_event);
     MPV_FUNCTION(mpv_error_string);
     MPV_FUNCTION(mpv_request_log_messages);
@@ -171,6 +177,8 @@ struct GalleryVideoPlayer::Impl {
             LOAD(mpv_set_property_async);
             LOAD(mpv_command_async);
             LOAD(mpv_observe_property);
+            LOAD(mpv_get_property_string);
+            LOAD(mpv_free);
             LOAD(mpv_wait_event);
             LOAD(mpv_error_string);
             LOAD(mpv_request_log_messages);
@@ -212,6 +220,10 @@ struct GalleryVideoPlayer::Impl {
             mpv_observe_property_fn(handle, kVolumeProperty, "volume", MPV_FORMAT_DOUBLE);
             mpv_observe_property_fn(handle, kEofProperty, "eof-reached", MPV_FORMAT_FLAG);
             mpv_observe_property_fn(handle, kAudioTrackProperty, "aid", MPV_FORMAT_INT64);
+            mpv_observe_property_fn(handle, kVideoWidthProperty, "width", MPV_FORMAT_INT64);
+            mpv_observe_property_fn(handle, kVideoHeightProperty, "height", MPV_FORMAT_INT64);
+            mpv_observe_property_fn(handle, kContainerProperty, "file-format", MPV_FORMAT_STRING);
+            mpv_observe_property_fn(handle, kVideoCodecProperty, "video-codec", MPV_FORMAT_STRING);
 
             mpv_render_param params[] = {
                 {MPV_RENDER_PARAM_API_TYPE, const_cast<char *>(MPV_RENDER_API_TYPE_SW)},
@@ -247,6 +259,33 @@ struct GalleryVideoPlayer::Impl {
         if (!loaded) return;
         playback.state = eof ? GalleryVideoPlaybackState::ended
                              : (paused ? GalleryVideoPlaybackState::paused : GalleryVideoPlaybackState::playing);
+    }
+
+    std::string string_property(const std::string &name)
+    {
+        auto *value = mpv_get_property_string_fn(handle, name.c_str());
+        if (!value) return {};
+        std::string result(value);
+        mpv_free_fn(value);
+        return result;
+    }
+
+    void update_audio_codec()
+    {
+        playback.audio_codec.clear();
+        std::istringstream count_text(string_property("track-list/count"));
+        int count = 0;
+        if (!(count_text >> count) || count < 0 || count > 1024) return;
+        for (int index = 0; index < count; ++index) {
+            const auto track = "track-list/" + std::to_string(index) + '/';
+            if (string_property(track + "type") != "audio") continue;
+            const auto codec = string_property(track + "codec");
+            if (string_property(track + "selected") == "yes") {
+                playback.audio_codec = codec;
+                return;
+            }
+            if (playback.audio_codec.empty()) playback.audio_codec = codec;
+        }
     }
 };
 
@@ -356,6 +395,7 @@ const GalleryVideoPlayback &GalleryVideoPlayer::poll()
         } else if (event->event_id == MPV_EVENT_FILE_LOADED) {
             player.loaded = true;
             player.playback.error.clear();
+            player.update_audio_codec();
             player.update_state();
         } else if (event->event_id == MPV_EVENT_END_FILE) {
             const auto *end = static_cast<const mpv_event_end_file *>(event->data);
@@ -387,6 +427,17 @@ const GalleryVideoPlayback &GalleryVideoPlayer::poll()
                 player.update_state();
             } else if (event->reply_userdata == kAudioTrackProperty && property->format == MPV_FORMAT_INT64)
                 player.playback.has_audio = *static_cast<const std::int64_t *>(property->data) >= 0;
+            else if (event->reply_userdata == kVideoWidthProperty && property->format == MPV_FORMAT_INT64)
+                player.playback.width = std::max<std::int64_t>(0, *static_cast<const std::int64_t *>(property->data));
+            else if (event->reply_userdata == kVideoHeightProperty && property->format == MPV_FORMAT_INT64)
+                player.playback.height = std::max<std::int64_t>(0, *static_cast<const std::int64_t *>(property->data));
+            else if ((event->reply_userdata == kContainerProperty || event->reply_userdata == kVideoCodecProperty) &&
+                     property->format == MPV_FORMAT_STRING) {
+                const auto *value = *static_cast<char *const *>(property->data);
+                auto &target = event->reply_userdata == kContainerProperty ? player.playback.container
+                                                                         : player.playback.video_codec;
+                target = value ? value : "";
+            }
         } else if (event->event_id == MPV_EVENT_LOG_MESSAGE) {
             const auto *log = static_cast<const mpv_event_log_message *>(event->data);
             if (log && log->text && *log->text && player.playback.state == GalleryVideoPlaybackState::loading)

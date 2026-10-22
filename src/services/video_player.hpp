@@ -22,6 +22,11 @@ struct GalleryVideoPlayback {
     double volume                   = 100.0;
     bool buffering                  = false;
     bool has_audio                  = false;
+    std::int64_t width               = 0;
+    std::int64_t height              = 0;
+    std::string container;
+    std::string video_codec;
+    std::string audio_codec;
     std::string error;
 };
 

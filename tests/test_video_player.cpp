@@ -36,6 +36,10 @@ int main(int argc, char **argv)
     assert(wait_for(player, [](const auto &state) {
         return state.state == GalleryVideoPlaybackState::playing && state.duration >= 2.5 && state.has_audio;
     }));
+    assert(wait_for(player, [](const auto &state) {
+        return state.width == 160 && state.height == 90 && !state.container.empty() && !state.video_codec.empty() &&
+               !state.audio_codec.empty();
+    }));
 
     player.set_volume(34.0);
     assert(wait_for(player, [](const auto &state) { return std::abs(state.volume - 34.0) < 0.5; }));
@@ -63,4 +67,7 @@ int main(int argc, char **argv)
         return state.state == GalleryVideoPlaybackState::playing && std::abs(state.position - 0.5) < 0.3;
     }));
     player.stop();
+    const auto &stopped = player.poll();
+    assert(stopped.width == 0 && stopped.height == 0 && stopped.container.empty() && stopped.video_codec.empty() &&
+           stopped.audio_codec.empty());
 }

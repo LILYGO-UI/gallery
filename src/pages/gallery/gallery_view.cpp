@@ -7,11 +7,14 @@
 #include <cm0/typography.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
+#include <iomanip>
 #include <memory>
+#include <sstream>
 #include <string>
 
 namespace {
@@ -190,6 +193,36 @@ std::string format_video_time(double seconds)
     return text;
 }
 
+std::string media_format(const std::string &path)
+{
+    const auto dot = path.find_last_of('.');
+    if (dot == std::string::npos) return "--";
+    std::string extension = path.substr(dot + 1);
+    std::transform(extension.begin(), extension.end(), extension.begin(),
+                   [](unsigned char value) { return static_cast<char>(std::toupper(value)); });
+    return extension == "JPG" ? "JPEG" : extension;
+}
+
+std::string format_file_size(std::uint64_t bytes)
+{
+    std::ostringstream text;
+    text << bytes << " bytes";
+    if (bytes >= 1024U) {
+        const char *unit = "KiB";
+        double size      = static_cast<double>(bytes) / 1024.0;
+        if (size >= 1024.0) {
+            size /= 1024.0;
+            unit = "MiB";
+        }
+        if (size >= 1024.0) {
+            size /= 1024.0;
+            unit = "GiB";
+        }
+        text << " (" << std::fixed << std::setprecision(1) << size << ' ' << unit << ')';
+    }
+    return text.str();
+}
+
 void style_video_slider(lv_obj_t *slider)
 {
     lv_obj_set_height(slider, 10);
@@ -322,7 +355,7 @@ void GalleryView::destroy() noexcept
     video_delete_button_ = video_volume_icon_ = video_volume_slider_ = nullptr;
     video_fullscreen_button_ = video_fullscreen_icon_ = nullptr;
     viewer_zoom_controls_ = viewer_zoom_label_ = nullptr;
-    viewer_controls_ = viewer_details_ = viewer_details_body_ = viewer_detail_text_ = nullptr;
+    viewer_controls_ = viewer_details_ = viewer_details_title_ = viewer_details_body_ = viewer_detail_text_ = nullptr;
     viewer_index_ = filmstrip_ = previous_button_ = next_button_ = delete_button_ = nullptr;
     delete_confirmation_ = delete_error_ = nullptr;
     layout_width_ = layout_height_ = -1;
@@ -587,10 +620,10 @@ void GalleryView::create_viewer()
     lv_obj_add_event_cb(details_header, swipe_event, LV_EVENT_PRESSED, this);
     lv_obj_add_event_cb(details_header, swipe_event, LV_EVENT_RELEASED, this);
     lv_obj_add_event_cb(details_header, swipe_event, LV_EVENT_PRESS_LOST, this);
-    auto *title = create_label(details_header, "Photo Details", 22, components::color_container_title);
-    lv_obj_set_name_static(title, "gallery_viewer_details_title");
-    lv_obj_set_flex_grow(title, 1);
-    lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
+    viewer_details_title_ = create_label(details_header, "Photo Details", 22, components::color_container_title);
+    lv_obj_set_name_static(viewer_details_title_, "gallery_viewer_details_title");
+    lv_obj_set_flex_grow(viewer_details_title_, 1);
+    lv_label_set_long_mode(viewer_details_title_, LV_LABEL_LONG_DOT);
     create_button(details_header, LV_SYMBOL_CLOSE, components::color_action, close_details_event, this,
                   "gallery_viewer_details_close");
 
@@ -1081,6 +1114,7 @@ void GalleryView::render_viewer()
         viewer_zoom_      = 1.0F;
         viewer_pan_x_     = 0;
         viewer_pan_y_     = 0;
+        lv_obj_scroll_to_y(viewer_details_body_, 0, LV_ANIM_OFF);
     }
     if (item->kind == GalleryMediaKind::video) {
         set_hidden(viewer_zoom_controls_, true);
@@ -1102,17 +1136,7 @@ void GalleryView::render_viewer()
         }
         lv_label_set_text(viewer_date_, photo_date(item->modified_time).c_str());
         lv_label_set_text(viewer_filename_, item->filename.c_str());
-        const auto source = item->source == GallerySource::camera        ? "Camera"
-                            : item->source == GallerySource::pictures    ? "Pictures"
-                            : item->source == GallerySource::screenshots ? "Screenshots"
-                                                                         : "Samples (read-only)";
-        const auto details = "Filename: " + item->filename + "\n\nModified: " + photo_date(item->modified_time, true) +
-                             "\nSize: " + std::to_string(item->size_bytes) + " bytes\nSource: " + source +
-                             "\n\nLocation: " + item->photo_path;
-        if (details != lv_label_get_text(viewer_detail_text_)) {
-            lv_label_set_text(viewer_detail_text_, details.c_str());
-            lv_obj_scroll_to_y(viewer_details_body_, 0, LV_ANIM_OFF);
-        }
+        update_details(*item);
         update_video_controls();
         update_navigation();
         render_video_frame();
@@ -1149,17 +1173,7 @@ void GalleryView::render_viewer()
     }
     lv_label_set_text(viewer_date_, photo_date(item->modified_time).c_str());
     lv_label_set_text(viewer_filename_, item->filename.c_str());
-    const auto source  = item->source == GallerySource::camera        ? "Camera"
-                         : item->source == GallerySource::pictures    ? "Pictures"
-                         : item->source == GallerySource::screenshots ? "Screenshots"
-                                                                      : "Samples (read-only)";
-    const auto details = "Filename: " + item->filename + "\n\nModified: " + photo_date(item->modified_time, true) +
-                         "\nSize: " + std::to_string(item->size_bytes) + " bytes\nSource: " + source +
-                         "\n\nLocation: " + item->photo_path;
-    if (details != lv_label_get_text(viewer_detail_text_)) {
-        lv_label_set_text(viewer_detail_text_, details.c_str());
-        lv_obj_scroll_to_y(viewer_details_body_, 0, LV_ANIM_OFF);
-    }
+    update_details(*item);
     set_hidden(viewer_status_, loaded);
     update_navigation();
 }
@@ -1278,6 +1292,7 @@ void GalleryView::playback_tick()
         view_model_.selected_item()->kind != GalleryMediaKind::video || !video_player_)
         return;
     video_playback_ = video_player_->poll();
+    if (details_visible_) update_details(*view_model_.selected_item());
     if (video_playback_.state == GalleryVideoPlaybackState::error) {
         const auto message = video_playback_.error.empty() ? "Unable to play video" : video_playback_.error;
         lv_label_set_text(viewer_status_, message.c_str());
@@ -1303,6 +1318,40 @@ void GalleryView::set_details_visible(bool visible)
     set_hidden(filmstrip_, visible || lv_obj_get_content_height(surface_) < 400);
     update_video_controls();
     if (visible) lv_obj_scroll_to_y(viewer_details_body_, 0, LV_ANIM_OFF);
+}
+
+void GalleryView::update_details(const GalleryItem &item)
+{
+    const bool video = item.kind == GalleryMediaKind::video;
+    const auto *source = item.source == GallerySource::camera        ? "Camera"
+                         : item.source == GallerySource::pictures    ? "Pictures"
+                         : item.source == GallerySource::screenshots ? "Screenshots"
+                                                                      : "Samples (read-only)";
+    std::string details = "Filename: " + item.filename + "\nType: " + (video ? "Video" : "Photo") +
+                          "\nFormat: " + media_format(item.photo_path) + '\n';
+    std::uint32_t width = 0, height = 0;
+    if (video) {
+        if (video_playback_.width > 0 && video_playback_.height > 0) {
+            width  = static_cast<std::uint32_t>(video_playback_.width);
+            height = static_cast<std::uint32_t>(video_playback_.height);
+        }
+    } else {
+        (void)gallery_probe_image(item.photo_path, width, height);
+    }
+    details += width > 0 && height > 0
+                   ? "Resolution: " + std::to_string(width) + " x " + std::to_string(height) + " px\n"
+                   : "Resolution: --\n";
+    if (video) {
+        details += "Duration: " +
+                   (video_playback_.duration > 0.0 ? format_video_time(video_playback_.duration) : "--") + '\n';
+        if (!video_playback_.video_codec.empty()) details += "Video codec: " + video_playback_.video_codec + '\n';
+        if (!video_playback_.audio_codec.empty()) details += "Audio codec: " + video_playback_.audio_codec + '\n';
+        if (!video_playback_.container.empty()) details += "Container: " + video_playback_.container + '\n';
+    }
+    details += "\nModified: " + photo_date(item.modified_time, true) + "\nSize: " + format_file_size(item.size_bytes) +
+               "\nSource: " + source + "\n\nLocation: " + item.photo_path;
+    if (details != lv_label_get_text(viewer_detail_text_)) lv_label_set_text(viewer_detail_text_, details.c_str());
+    lv_label_set_text(viewer_details_title_, video ? "Video Details" : "Photo Details");
 }
 
 void GalleryView::update_header() noexcept

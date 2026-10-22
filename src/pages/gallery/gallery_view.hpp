@@ -88,6 +88,7 @@ private:
     void set_viewer_zoom(float zoom);
     void position_viewer_canvas();
     void set_details_visible(bool visible);
+    void update_details(const GalleryItem &item);
     void stop_video() noexcept;
     void render_video_frame();
     void update_video_controls() noexcept;
@@ -133,6 +134,7 @@ private:
     lv_obj_t *viewer_zoom_label_    = nullptr;
     lv_obj_t *viewer_controls_      = nullptr;
     lv_obj_t *viewer_details_       = nullptr;
+    lv_obj_t *viewer_details_title_ = nullptr;
     lv_obj_t *viewer_details_body_  = nullptr;
     lv_obj_t *viewer_detail_text_   = nullptr;
     lv_obj_t *viewer_index_         = nullptr;

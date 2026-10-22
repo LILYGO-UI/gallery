@@ -46,9 +46,10 @@ More portrait and landscape screens are in [`assets/previews`](assets/previews).
   filmstrip, previous/next controls, or horizontal swipes; use the plus/minus
   controls to zoom photos in 25% steps and drag a zoomed photo to inspect other
   regions; swipe down to return to the grid.
-- **Photo details:** swipe up or use the details button to view the filename,
-  modification time, size, source, and location in a scrollable panel. Closing
-  it restores viewer controls.
+- **Media details:** swipe up or use the details button to view the filename,
+  format, original resolution, modification time, size, source, and location
+  in a scrollable panel. Video details also show duration, video and audio
+  codecs, and container information. Closing it restores viewer controls.
 - **Deletion confirmation:** confirm permanent deletion in a bottom action
   sheet, including removal of a generated video or camera thumbnail. Samples
   are read-only.

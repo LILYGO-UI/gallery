@@ -131,13 +131,20 @@ bool read_stored_thumbnail(const std::string &path, SourceImage &image)
     return true;
 }
 
-bool read_ppm_token(FILE *file, std::string &token)
+bool read_ppm_token(FILE *file, std::string &token, std::size_t *remaining = nullptr)
 {
     token.clear();
+    const auto next = [file, remaining]() {
+        if (remaining) {
+            if (*remaining == 0) return EOF;
+            --*remaining;
+        }
+        return std::fgetc(file);
+    };
     int value = 0;
-    while ((value = std::fgetc(file)) != EOF) {
+    while ((value = next()) != EOF) {
         if (value == '#') {
-            while ((value = std::fgetc(file)) != EOF && value != '\n') {
+            while ((value = next()) != EOF && value != '\n') {
             }
             continue;
         }
@@ -146,8 +153,9 @@ bool read_ppm_token(FILE *file, std::string &token)
     if (value == EOF) return false;
 
     do {
+        if (token.size() >= 32) return false;
         token.push_back(static_cast<char>(value));
-        value = std::fgetc(file);
+        value = next();
     } while (value != EOF && !std::isspace(static_cast<unsigned char>(value)));
     return !token.empty();
 }
@@ -348,7 +356,94 @@ bool is_start_of_frame_marker(unsigned char marker)
     }
 }
 
+bool probe_png(FILE *file, std::uint32_t &width, std::uint32_t &height)
+{
+    constexpr std::array<unsigned char, 8> signature{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a};
+    std::array<unsigned char, 33> header{};
+    if (std::fread(header.data(), 1, header.size(), file) != header.size() ||
+        !std::equal(signature.begin(), signature.end(), header.begin()) ||
+        std::memcmp(header.data() + 8, "\0\0\0\x0dIHDR", 8) != 0)
+        return false;
+    const auto read_u32 = [](const unsigned char *bytes) {
+        return (static_cast<std::uint32_t>(bytes[0]) << 24U) | (static_cast<std::uint32_t>(bytes[1]) << 16U) |
+               (static_cast<std::uint32_t>(bytes[2]) << 8U) | bytes[3];
+    };
+    width  = read_u32(header.data() + 16);
+    height = read_u32(header.data() + 20);
+    return width > 0 && height > 0 && width <= 0x7fffffffU && height <= 0x7fffffffU;
+}
+
+bool probe_ppm(FILE *file, std::uint32_t &width, std::uint32_t &height)
+{
+    std::string magic, width_text, height_text, maximum_text;
+    std::uint32_t maximum = 0;
+    std::size_t remaining = 64U * 1024U;
+    return read_ppm_token(file, magic, &remaining) && read_ppm_token(file, width_text, &remaining) &&
+           read_ppm_token(file, height_text, &remaining) && read_ppm_token(file, maximum_text, &remaining) &&
+           magic == "P6" && parse_unsigned(width_text, width) &&
+           parse_unsigned(height_text, height) && parse_unsigned(maximum_text, maximum) && maximum == 255 &&
+           width > 0 && height > 0;
+}
+
+bool probe_jpeg(FILE *file, std::uint32_t &width, std::uint32_t &height)
+{
+    std::uint64_t remaining = kMaximumJpegInputBytes;
+    const auto next = [&remaining, file]() {
+        if (remaining == 0) return EOF;
+        --remaining;
+        return std::fgetc(file);
+    };
+    const int first  = next();
+    const int second = next();
+    if (first != 0xff || second != 0xd8) return false;
+
+    while (remaining > 0) {
+        int prefix = next();
+        while (prefix != EOF && prefix != 0xff) prefix = next();
+        if (prefix == EOF) return false;
+        int marker = next();
+        while (marker == 0xff) marker = next();
+        if (marker == EOF || marker == 0xd9 || marker == 0xda) return false;
+        if (marker == 0x00 || marker == 0xd8 || marker == 0x01 || (marker >= 0xd0 && marker <= 0xd7)) continue;
+
+        const int length_high = next();
+        const int length_low  = next();
+        if (length_high == EOF || length_low == EOF) return false;
+        const auto length = static_cast<unsigned>((length_high << 8) | length_low);
+        if (length < 2 || length - 2 > remaining) return false;
+        if (is_start_of_frame_marker(static_cast<unsigned char>(marker))) {
+            std::array<unsigned char, 5> frame{};
+            if (length < 7 || std::fread(frame.data(), 1, frame.size(), file) != frame.size()) return false;
+            height = (static_cast<std::uint32_t>(frame[1]) << 8U) | frame[2];
+            width  = (static_cast<std::uint32_t>(frame[3]) << 8U) | frame[4];
+            return width > 0 && height > 0;
+        }
+        if (std::fseek(file, static_cast<long>(length - 2), SEEK_CUR) != 0) return false;
+        remaining -= length - 2;
+    }
+    return false;
+}
+
 }  // namespace
+
+bool gallery_probe_image(const std::string &path, std::uint32_t &width, std::uint32_t &height)
+{
+    width = height = 0;
+    const auto extension = lowercase_extension(path);
+    auto *file = std::fopen(path.c_str(), "rb");
+    if (!file) return false;
+    std::uint32_t source_width = 0, source_height = 0;
+    bool valid = false;
+    if (extension == ".png") valid = probe_png(file, source_width, source_height);
+    else if (extension == ".ppm") valid = probe_ppm(file, source_width, source_height);
+    else if (extension == ".jpg" || extension == ".jpeg") valid = probe_jpeg(file, source_width, source_height);
+    std::fclose(file);
+    if (valid) {
+        width  = source_width;
+        height = source_height;
+    }
+    return valid;
+}
 
 bool gallery_render_image(const std::string &path, std::uint32_t width, std::uint32_t height, GalleryImageFit fit,
                           std::vector<std::uint8_t> &rgb565)

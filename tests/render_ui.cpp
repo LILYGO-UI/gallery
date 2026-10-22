@@ -423,14 +423,25 @@ int main(int argc, char **argv)
     auto *details_close  = lv_obj_find_by_name(context.root, "gallery_viewer_details_close");
     auto *details_header = lv_obj_find_by_name(context.root, "gallery_viewer_details_header");
     auto *details_body   = lv_obj_find_by_name(context.root, "gallery_viewer_details_body");
+    auto *details_title  = lv_obj_find_by_name(context.root, "gallery_viewer_details_title");
     auto *filename       = lv_obj_find_by_name(context.root, "gallery_viewer_filename");
     auto *details_button = lv_obj_find_by_name(context.root, "gallery_viewer_details_button");
-    assert(details && details_text && details_close && details_header && details_body && filename && details_button);
+    assert(details && details_text && details_close && details_header && details_body && details_title && filename &&
+           details_button);
     assert(!lv_obj_is_visible(details));
+    lv_obj_send_event(zoom_in, LV_EVENT_CLICKED, nullptr);
     lv_obj_send_event(details_button, LV_EVENT_CLICKED, nullptr);
     assert(lv_obj_is_visible(viewer) && lv_obj_is_visible(details));
+    assert(std::string(lv_label_get_text(details_title)) == "Photo Details");
+    const bool full_size_photo = (sample_directory && *sample_directory) ||
+                                 std::string(lv_label_get_text(filename)) == "harbor.jpg";
+    const auto original_resolution = full_size_photo ? "Resolution: 320 x 240" : "Resolution: 96 x 72";
+    assert(std::string(lv_label_get_text(details_text)).find(original_resolution) != std::string::npos);
+    assert(std::string(lv_label_get_text(details_text)).find("Format: ") != std::string::npos);
     tap(pointer, details_close);
     assert(lv_obj_is_visible(viewer) && !lv_obj_is_visible(details));
+    lv_obj_send_event(zoom_out, LV_EVENT_CLICKED, nullptr);
+    assert(std::string(lv_label_get_text(zoom_label)) == "100%");
     swipe(pointer, viewer_image, 0, -40);
     assert(lv_obj_is_visible(viewer) && !lv_obj_is_visible(details));
     swipe(pointer, viewer_image, 0, 40);
@@ -738,6 +749,35 @@ int main(int argc, char **argv)
         lv_obj_send_event(fullscreen, LV_EVENT_CLICKED, nullptr);
         lv_obj_update_layout(context.root);
         assert(lv_obj_is_visible(video_top_bar) && lv_obj_is_visible(video_filmstrip));
+
+        lv_obj_send_event(video_details, LV_EVENT_CLICKED, nullptr);
+        for (int attempt = 0; attempt < 100 &&
+                                std::string(lv_label_get_text(details_text)).find("aac") == std::string::npos;
+             ++attempt) {
+            lv_tick_inc(25);
+            lv_timer_handler();
+            lv_obj_update_layout(context.root);
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        assert(lv_obj_is_visible(details));
+        assert(std::string(lv_label_get_text(details_title)) == "Video Details");
+        const std::string video_metadata = lv_label_get_text(details_text);
+        assert(video_metadata.find("Resolution: 160 x 90") != std::string::npos);
+        assert(video_metadata.find("Duration: 0:03") != std::string::npos);
+        assert(video_metadata.find("aac") != std::string::npos);
+        for (const auto *field : {"Format: ", "Video codec: ", "Audio codec: ", "Container: "}) {
+            const auto start = video_metadata.find(field);
+            assert(start != std::string::npos);
+            const auto value_start = start + std::string(field).size();
+            const auto value = video_metadata.substr(value_start, video_metadata.find('\n', value_start) - value_start);
+            assert(!value.empty() && value != "Unknown" && value != "Unavailable");
+        }
+        assert_within_display(details, width, height);
+        assert_within_display(details_close, width, height);
+        lv_refr_now(display);
+        assert(write_snapshot((std::string(argv[3]) + ".video-details.ppm").c_str(), width, height));
+        tap(pointer, details_close);
+        assert(!lv_obj_is_visible(details) && lv_obj_is_visible(actions));
         descriptor->close();
         assert(std::remove(video_path.c_str()) == 0);
         assert(std::remove(gallery_media_thumbnail_path(video_path).c_str()) == 0);
